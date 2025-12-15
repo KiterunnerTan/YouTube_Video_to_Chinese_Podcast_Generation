@@ -1,0 +1,24 @@
+# YouTube Download
+yt-dlp>=2024.0.0
+
+# HTTP Requests
+requests>=2.31.0
+
+# Google Gemini API
+google-generativeai>=0.3.0
+
+# Alibaba Cloud DashScope (Qwen3-ASR)
+dashscope>=1.20.0
+
+# Audio Processing
+# Note: Using ffmpeg command-line tool instead of pydub for Python 3.14+ compatibility
+# pydub>=0.25.1
+
+# Configuration
+python-dotenv>=1.0.0
+
+# CLI
+click>=8.1.0
+
+# Utilities
+tqdm>=4.66.0
