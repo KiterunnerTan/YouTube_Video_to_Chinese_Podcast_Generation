@@ -99,15 +99,23 @@ class GeminiTTSGenerator:
 
 像一个真正的播客主播一样，充满感情和节奏感地朗读，而不是机械地念稿子。"""
 
+        # 注意：Gemini TTS API可能不支持systemInstruction
+        # 我们将系统指令直接附加到文本前面，让TTS模型理解
+        enhanced_text = f"""请用专业播客主播的方式朗读以下内容。根据文本中的情绪标记调整你的语调、语速和情绪：
+
+- [平静地]：正常语速，平稳清晰
+- [兴奋地]：提高音量和语调，充满热情
+- [强调地]：放慢并加重，清晰有力
+- [思考地]：略微放慢，有犹豫感
+- [疑问地]：音调上扬
+- 【关键词】：重读并略微延长
+
+{text}"""
+
         payload = {
-            "systemInstruction": {
-                "parts": [{
-                    "text": system_instruction
-                }]
-            },
             "contents": [{
                 "parts": [{
-                    "text": text
+                    "text": enhanced_text
                 }]
             }],
             "generationConfig": {
