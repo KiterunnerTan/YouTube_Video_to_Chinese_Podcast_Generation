@@ -13,22 +13,28 @@ from .proxy_health_checker import ProxyHealthChecker
 class VoiceManager:
     """
     音色管理器 - 支持多speaker自动分配音色
+    MiniMax音色方案: 专业权威型
     """
-    # 默认音色优先级队列（最多8个speaker）
+    # MiniMax音色映射（2-speaker播客方案 - 默认）
     DEFAULT_VOICE_QUEUE = [
-        ("speaker_0", "Kore"),      # 主持人（女）
-        ("speaker_1", "Charon"),    # 主要嘉宾（男）
-        ("speaker_2", "Puck"),      # 次要嘉宾（男，活泼）
-        ("speaker_3", "Aoede"),     # 次要主持（女，表现力强）
-        ("speaker_4", "Fenrir"),    # 专家A（男，力量感）
-        ("speaker_5", "Leda"),      # 专家B（女，专业）
-        ("speaker_6", "Orus"),      # 分析师（男，技术感）
-        ("speaker_7", "Zephyr"),    # 旁白（中性）
+        ("speaker_0", "Inspirational_girl"),  # 鼓舞人心的声音 - 热情、有感染力
+        ("speaker_1", "Deep_Voice_Man"),      # 深沉男性 - 权威、稳重
     ]
 
-    def __init__(self):
-        """初始化音色管理器"""
-        self.voice_mapping = dict(self.DEFAULT_VOICE_QUEUE)
+    def __init__(self, voice_config: Optional[Dict[str, str]] = None):
+        """
+        初始化音色管理器
+
+        Args:
+            voice_config: 自定义音色配置，如 {"speaker_0": "Grounded_Grace", "speaker_1": "Credible_Alex"}
+                         如果不传，使用默认配置
+        """
+        if voice_config:
+            self.voice_mapping = voice_config
+            print(f"✓ 使用自定义音色配置: {voice_config}")
+        else:
+            self.voice_mapping = dict(self.DEFAULT_VOICE_QUEUE)
+            print(f"✓ 使用默认音色配置")
 
     def get_voice(self, speaker_id: int) -> str:
         """
@@ -136,40 +142,69 @@ class GeminiTTSGeneratorV14:
     def __init__(
         self,
         api_key: str,
-        model_name: str = "gemini-2.5-pro-preview-tts",
+        group_id: str,
+        model_name: str = "speech-2.6-hd",
         voice_manager: Optional[VoiceManager] = None,
         enable_cache: bool = True
     ):
         """
-        Initialize Gemini TTS generator v1.4 with multi-speaker support
+        Initialize MiniMax TTS generator (v1.4 compatible interface)
 
         Args:
-            api_key: Gemini API key
+            api_key: MiniMax API key
+            group_id: MiniMax Group ID
             model_name: TTS model name
             voice_manager: 音色管理器（可选，默认创建新的）
             enable_cache: Enable request caching to reduce API calls
         """
         self.api_key = api_key
+        self.group_id = group_id
         self.model_name = model_name
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        self.base_url = "https://api.minimax.io"
         self.voice_manager = voice_manager or VoiceManager()
         self.cache = AudioCache() if enable_cache else None
 
-        # Setup proxy
-        self.proxies = {}
-        if os.getenv('HTTP_PROXY'):
-            self.proxies['http'] = os.getenv('HTTP_PROXY')
-        if os.getenv('HTTPS_PROXY'):
-            self.proxies['https'] = os.getenv('HTTPS_PROXY')
-
-        # Initialize proxy health checker
-        self.proxy_checker = ProxyHealthChecker(self.proxies) if self.proxies else None
-
-        print(f"✓ Using Gemini TTS model: {model_name}")
-        if self.proxies:
-            print(f"✓ Using proxy: {self.proxies}")
+        print(f"✓ Using MiniMax TTS model: {model_name}")
+        print(f"✓ Voice mapping: speaker_0={self.voice_manager.voice_mapping.get('speaker_0')}, "
+              f"speaker_1={self.voice_manager.voice_mapping.get('speaker_1')}")
         if self.cache:
             print(f"✓ Request caching enabled")
+
+    def _parse_speaker_segments(self, text: str) -> List[Dict[str, Any]]:
+        """
+        解析多speaker文本为独立segments
+
+        Args:
+            text: 包含speaker标记的文本，如 "speaker_0: hello\nspeaker_1: world"
+
+        Returns:
+            List of segments: [{"speaker": "speaker_0", "content": "hello", "voice_id": "Wise_Woman"}, ...]
+        """
+        import re
+
+        segments = []
+        pattern = r'^(speaker_\d+):\s*(.+)$'
+
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+
+            match = re.match(pattern, line)
+            if match:
+                speaker_id, content = match.groups()
+                voice_id = self.voice_manager.get_voice(int(speaker_id.split('_')[1]))
+                segments.append({
+                    "speaker": speaker_id,
+                    "content": content.strip(),
+                    "voice_id": voice_id
+                })
+            else:
+                # 如果没有speaker标记，追加到上一个segment
+                if segments:
+                    segments[-1]["content"] += " " + line
+
+        return segments
 
     def generate_audio(
         self,
@@ -178,196 +213,174 @@ class GeminiTTSGeneratorV14:
         language: str = "zh-CN"
     ) -> Path:
         """
-        Generate audio from text with multi-speaker support
+        Generate audio from text with multi-speaker support using MiniMax API
 
         Args:
             text: Text with speaker markers (e.g., "speaker_0: hello\nspeaker_1: world")
             output_path: Path to save audio file
-            language: Language code
+            language: Language code (not used in MiniMax)
 
         Returns:
             Path to generated audio file
         """
-        # ⭐ CRITICAL: Check proxy health BEFORE making any API request
-        # This prevents wasting API quota on failed proxy connections
-        if self.proxy_checker:
-            print("\n🔍 Checking proxy health before API request...")
-            if not self.proxy_checker.is_healthy():
-                raise RuntimeError(
-                    "❌ Proxy health check failed. Please check your proxy settings.\n"
-                    "This check prevents wasting API quota on doomed requests.\n"
-                    f"Proxy: {self.proxies}"
-                )
-            print("✓ Proxy is healthy, proceeding with API request\n")
-
-        # 构建multi-speaker配置 (要求text中只有speaker_0和speaker_1)
-        speech_config = self.voice_manager.build_multi_speaker_config(text)
-
         # Check cache first
+        cache_key = f"{text}_{self.model_name}"
         if self.cache:
-            cached_audio = self.cache.get(text, self.model_name, speech_config)
+            cached_audio = self.cache.get(text, self.model_name, {"model": self.model_name})
             if cached_audio:
-                # Copy cached file to output path
                 import shutil
+                import os
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(cached_audio, output_path)
-                print(f"✓ Using cached audio: {output_path}")
+                # Only copy if source and destination are different files
+                try:
+                    if os.path.samefile(cached_audio, output_path):
+                        print(f"✓ Using cached audio (already at target): {output_path}")
+                    else:
+                        shutil.copy(cached_audio, output_path)
+                        print(f"✓ Using cached audio: {output_path}")
+                except (OSError, FileNotFoundError):
+                    # If files don't exist or can't be compared, just copy
+                    shutil.copy(cached_audio, output_path)
+                    print(f"✓ Using cached audio: {output_path}")
                 return output_path
+
+        # 解析speaker segments
+        segments = self._parse_speaker_segments(text)
 
         # 打印使用的音色配置
         speakers = self.voice_manager.get_all_speakers_from_text(text)
         print(f"📻 Speakers detected: {len(speakers)}")
         for speaker_name in speakers:
-            voice_name = "Kore" if speaker_name == "speaker_0" else "Charon"
-            print(f"   {speaker_name}: {voice_name}")
+            voice_id = self.voice_manager.get_voice(int(speaker_name.split('_')[1]))
+            print(f"   {speaker_name}: {voice_id}")
 
-        url = f"{self.base_url}/models/{self.model_name}:generateContent"
+        print(f"Generating audio ({len(segments)} segments, {len(text)} chars total)...")
 
-        headers = {
-            'Content-Type': 'application/json',
-        }
-
-        payload = {
-            "contents": [{
-                "parts": [{
-                    "text": text
-                }]
-            }],
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": speech_config
+        # 为每个segment生成音频
+        audio_chunks = []
+        for i, segment in enumerate(segments):
+            url = f"{self.base_url}/v1/t2a_v2?GroupId={self.group_id}"
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
             }
-        }
 
-        params = {
-            'key': self.api_key
-        }
+            payload = {
+                "model": self.model_name,
+                "text": segment["content"],
+                "voice_setting": {
+                    "voice_id": segment["voice_id"],
+                    "speed": 1.0
+                    # 不传emotion参数，让API自动推断情绪（类似Gemini 2.5 Pro）
+                },
+                "audio_setting": {
+                    "format": "mp3",
+                    "sample_rate": 24000
+                }
+            }
 
-        # Retry logic with minimal retries
-        # Since we check proxy health before making requests,
-        # we only need 1 retry for transient network issues
-        max_retries = 1  # Only 1 retry (total 2 attempts max)
-        retry_delay = 10
+            # DEBUG: 打印实际发送的voice_id
+            print(f"  Segment {i+1}: speaker={segment.get('speaker')}, voice_id={segment['voice_id']}")
 
-        for attempt in range(max_retries):
-            try:
-                print(f"Generating audio (length: {len(text)} chars)...")
+            # 重试机制：最多3次重试，指数退避
+            max_retries = 3
+            retry_count = 0
+            success = False
 
-                # Use simple requests.post instead of Session with adapters
-                # This avoids connection pool issues with proxy
-                import warnings
-                warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+            while retry_count <= max_retries and not success:
+                try:
+                    # 增加超时时间到90秒
+                    response = requests.post(url, headers=headers, json=payload, timeout=90)
 
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    params=params,
-                    proxies=self.proxies if self.proxies else None,
-                    verify=True,  # Use True to avoid proxy SSL issues
-                    timeout=300
-                )
+                    if response.status_code != 200:
+                        raise RuntimeError(f"MiniMax API error: {response.status_code} - {response.text}")
 
-                if response.status_code != 200:
-                    # Check for quota errors - don't retry these
-                    if response.status_code == 429:
-                        error_msg = f"⚠️ API QUOTA EXCEEDED: {response.text}"
-                        print(error_msg)
-                        raise RuntimeError(error_msg)
+                    result = response.json()
 
-                    raise RuntimeError(
-                        f"TTS API request failed: {response.status_code} - {response.text}"
-                    )
+                    if "data" not in result or "audio" not in result["data"]:
+                        raise RuntimeError(f"No audio data in response: {result}")
 
-                result = response.json()
+                    # MiniMax返回hex编码的音频数据
+                    audio_hex = result["data"]["audio"]
+                    audio_bytes = bytes.fromhex(audio_hex)
+                    audio_chunks.append(audio_bytes)
+                    success = True
 
-                # Extract audio data
-                if 'candidates' not in result or len(result['candidates']) == 0:
-                    raise RuntimeError(f"No candidates in TTS response: {result}")
+                except (requests.exceptions.SSLError, requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout) as e:
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        wait_time = (2 ** retry_count) * 2  # 指数退避: 4s, 8s, 16s
+                        print(f"    ⚠️  网络错误 (尝试 {retry_count}/{max_retries}): {type(e).__name__}")
+                        print(f"    ⏳ 等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)
+                    else:
+                        raise RuntimeError(
+                            f"Failed to generate segment {i+1}/{len(segments)} after {max_retries} retries: {str(e)}"
+                        )
 
-                candidate = result['candidates'][0]
-                if 'content' not in candidate:
-                    raise RuntimeError(f"No content in candidate: {candidate}")
+                except Exception as e:
+                    # 其他错误不重试，直接抛出
+                    raise RuntimeError(f"Failed to generate segment {i+1}/{len(segments)}: {str(e)}")
 
-                parts = candidate['content'].get('parts', [])
-                audio_base64 = None
-                mime_type = None
+        # 合并所有音频片段
+        print(f"Merging {len(audio_chunks)} audio segments...")
+        self._merge_audio_chunks(audio_chunks, output_path)
 
-                for part in parts:
-                    if 'inlineData' in part:
-                        inline_data = part['inlineData']
-                        if inline_data.get('mimeType', '').startswith('audio/'):
-                            mime_type = inline_data.get('mimeType')
-                            audio_base64 = inline_data.get('data', '')
-                            break
+        print(f"✓ Audio saved to: {output_path}")
 
-                if not audio_base64:
-                    raise RuntimeError(f"No audio data found in response")
+        # Save to cache
+        if self.cache:
+            self.cache.set(text, self.model_name, {"model": self.model_name}, output_path)
 
-                # Decode base64
-                audio_data = base64.b64decode(audio_base64)
+        return output_path
 
-                # Save audio
-                output_path.parent.mkdir(parents=True, exist_ok=True)
+    def _merge_audio_chunks(self, audio_chunks: List[bytes], output_path: Path):
+        """
+        合并多个MP3音频片段
 
-                # Check if it's PCM format
-                if 'pcm' in mime_type.lower() or 'L16' in mime_type:
-                    # Extract sample rate
-                    sample_rate = 24000
-                    if 'rate=' in mime_type:
-                        try:
-                            sample_rate = int(mime_type.split('rate=')[1].split(';')[0])
-                        except:
-                            pass
+        Args:
+            audio_chunks: List of audio bytes
+            output_path: Output file path
+        """
+        import subprocess
+        import tempfile
 
-                    # Convert PCM to MP3
-                    import tempfile
-                    import subprocess
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-                    with tempfile.NamedTemporaryFile(suffix='.pcm', delete=False) as tmp_file:
-                        tmp_file.write(audio_data)
-                        pcm_path = tmp_file.name
+        # 保存每个chunk为临时文件
+        temp_files = []
+        for i, chunk in enumerate(audio_chunks):
+            temp_file = Path(tempfile.gettempdir()) / f"tts_chunk_{i}_{int(time.time())}.mp3"
+            with open(temp_file, 'wb') as f:
+                f.write(chunk)
+            temp_files.append(temp_file)
 
-                    cmd = [
-                        'ffmpeg',
-                        '-f', 's16le',
-                        '-ar', str(sample_rate),
-                        '-ac', '1',
-                        '-i', pcm_path,
-                        '-b:a', '128k',
-                        '-y',
-                        str(output_path)
-                    ]
+        try:
+            # 使用ffmpeg合并
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+                for temp_file in temp_files:
+                    f.write(f"file '{temp_file.absolute()}'\n")
+                concat_list = f.name
 
-                    subprocess.run(cmd, capture_output=True, check=True)
-                    Path(pcm_path).unlink()
-                else:
-                    # Direct save
-                    with open(output_path, 'wb') as f:
-                        f.write(audio_data)
+            cmd = [
+                'ffmpeg',
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', concat_list,
+                '-c', 'copy',
+                '-y',
+                str(output_path)
+            ]
 
-                print(f"✓ Audio saved to: {output_path}")
+            subprocess.run(cmd, capture_output=True, check=True)
+            Path(concat_list).unlink()
 
-                # Save to cache for future use
-                if self.cache:
-                    self.cache.set(text, self.model_name, speech_config, output_path)
-
-                return output_path
-
-            except requests.exceptions.ProxyError as e:
-                if attempt < max_retries - 1:
-                    # Only 1 retry, fixed delay
-                    print(f"⚠ Proxy connection failed (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    raise RuntimeError(f"TTS API request failed after {max_retries} attempts: {str(e)}")
-
-            except requests.exceptions.RequestException as e:
-                raise RuntimeError(f"TTS API request failed: {str(e)}")
-
-            except Exception as e:
-                raise RuntimeError(f"Failed to generate audio: {str(e)}")
+        finally:
+            # 清理临时文件
+            for temp_file in temp_files:
+                if temp_file.exists():
+                    temp_file.unlink()
 
 
 if __name__ == "__main__":

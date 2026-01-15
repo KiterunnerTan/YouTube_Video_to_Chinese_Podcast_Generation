@@ -16,11 +16,13 @@ class Config:
 
     # API Keys
     DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")  # Alibaba Cloud DashScope (for Qwen3-ASR)
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Google Gemini (for translation & TTS)
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Google Gemini (for translation)
+    MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY")  # MiniMax (for TTS)
+    MINIMAX_GROUP_ID = os.getenv("MINIMAX_GROUP_ID")  # MiniMax Group ID
 
     # Proxy settings (for accessing Google services in China)
-    HTTP_PROXY = os.getenv("HTTP_PROXY")  # e.g., http://127.0.0.1:7890
-    HTTPS_PROXY = os.getenv("HTTPS_PROXY")  # e.g., http://127.0.0.1:7890
+    HTTP_PROXY = os.getenv("HTTP_PROXY")  # e.g., http://127.0.0.1:7897
+    HTTPS_PROXY = os.getenv("HTTPS_PROXY")  # e.g., http://127.0.0.1:7897
     ALL_PROXY = os.getenv("ALL_PROXY")  # Alternative proxy setting
 
     # Processing settings
@@ -62,6 +64,10 @@ class Config:
             missing.append("DASHSCOPE_API_KEY")
         if not cls.GEMINI_API_KEY:
             missing.append("GEMINI_API_KEY")
+        if not cls.MINIMAX_API_KEY:
+            missing.append("MINIMAX_API_KEY")
+        if not cls.MINIMAX_GROUP_ID:
+            missing.append("MINIMAX_GROUP_ID")
 
         if missing:
             raise ValueError(

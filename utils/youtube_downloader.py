@@ -1,14 +1,27 @@
 """YouTube video downloader using yt-dlp with cookie support"""
 import subprocess
 import sys
+import os
 from pathlib import Path
 from typing import Optional
 
 
 class YouTubeDownloader:
-    def __init__(self, output_dir: Path):
+    def __init__(self, output_dir: Path, proxy: Optional[str] = None):
+        """
+        Initialize YouTube downloader
+
+        Args:
+            output_dir: Directory to save downloaded files
+            proxy: Proxy URL (e.g., 'http://127.0.0.1:7897'). If None, will check HTTP_PROXY env var
+        """
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use provided proxy or check environment variable
+        self.proxy = proxy or os.environ.get('HTTP_PROXY') or os.environ.get('HTTPS_PROXY')
+        if self.proxy:
+            print(f"✓ YouTube Downloader will use proxy: {self.proxy}")
 
     def download(
         self,
@@ -37,17 +50,26 @@ class YouTubeDownloader:
             "-f", "bestvideo+bestaudio/best",  # Best quality video+audio
             "--merge-output-format", "mp4",    # Merge to mp4
             "-o", str(self.output_dir / (output_filename or "%(title)s.%(ext)s")),
+            "--socket-timeout", "30",           # Socket timeout
+            "--retries", "10",                  # Retry 10 times
+            "--fragment-retries", "10",         # Fragment retry
+            "--no-part",                        # Don't use .part files
+            "--fixup", "detect_or_warn",        # Warn about fixup issues instead of failing
         ]
 
-        # Add cookie file if provided
-        if cookie_file:
-            cookie_path = Path(cookie_file)
-            if not cookie_path.exists():
-                raise FileNotFoundError(f"Cookie file not found: {cookie_file}")
-            cmd.extend(["--cookies", str(cookie_path)])
+        # Add proxy if available
+        if self.proxy:
+            cmd.extend(["--proxy", self.proxy])
+
+        # Use browser cookies - this is the most reliable method
+        # Try Chrome first (most common)
+        print("⚠️  直接从Chrome浏览器读取cookies（更可靠）")
+        cmd.extend(["--cookies-from-browser", "chrome"])
 
         print(f"Downloading from: {url}")
         print(f"Output directory: {self.output_dir}")
+        if self.proxy:
+            print(f"Using proxy: {self.proxy}")
 
         try:
             result = subprocess.run(
@@ -59,18 +81,76 @@ class YouTubeDownloader:
             print(result.stdout)
 
             # Find the downloaded file
-            downloaded_files = list(self.output_dir.glob("*.mp4"))
-            if not downloaded_files:
-                raise RuntimeError("Download completed but no file found")
+            if output_filename:
+                # If output filename was specified, look for that specific file
+                expected_file = self.output_dir / f"{output_filename}.mp4"
 
-            # Return the most recently created file
-            downloaded_file = max(downloaded_files, key=lambda p: p.stat().st_mtime)
-            print(f"Downloaded: {downloaded_file}")
-            return downloaded_file
+                if expected_file.exists():
+                    downloaded_file = expected_file
+                    print(f"✓ Downloaded: {downloaded_file}")
+                    return downloaded_file
+                else:
+                    # Check if file exists without extension (yt-dlp fixup issue)
+                    file_without_ext = self.output_dir / output_filename
+                    if file_without_ext.exists():
+                        print(f"⚠️  Found file without .mp4 extension: {file_without_ext}")
+                        print(f"   Renaming to: {expected_file}")
+                        file_without_ext.rename(expected_file)
+                        downloaded_file = expected_file
+                        print(f"✓ Downloaded and fixed: {downloaded_file}")
+                        return downloaded_file
+
+                    # Check for other possible extensions
+                    possible_files = [
+                        self.output_dir / f"{output_filename}.webm",
+                        self.output_dir / f"{output_filename}.mkv",
+                        self.output_dir / f"{output_filename}.mp4.part",
+                    ]
+
+                    for possible_file in possible_files:
+                        if possible_file.exists():
+                            print(f"⚠️  Found file with different extension: {possible_file}")
+                            print(f"   Renaming to: {expected_file}")
+                            possible_file.rename(expected_file)
+                            downloaded_file = expected_file
+                            print(f"✓ Downloaded and fixed: {downloaded_file}")
+                            return downloaded_file
+
+                    # File doesn't exist - download may have failed silently
+                    raise RuntimeError(
+                        f"Expected file not found: {expected_file}\n"
+                        f"Download may have been skipped or failed. Please check yt-dlp output above."
+                    )
+            else:
+                # If no filename specified, find the most recently created file
+                downloaded_files = list(self.output_dir.glob("*.mp4"))
+                if not downloaded_files:
+                    raise RuntimeError("Download completed but no file found")
+                downloaded_file = max(downloaded_files, key=lambda p: p.stat().st_mtime)
+                print(f"✓ Downloaded: {downloaded_file}")
+                return downloaded_file
 
         except subprocess.CalledProcessError as e:
-            print(f"Error during download: {e.stderr}", file=sys.stderr)
-            raise RuntimeError(f"Failed to download video: {e.stderr}")
+            error_msg = e.stderr
+
+            # Provide helpful error messages
+            if "SSL" in error_msg or "ssl" in error_msg:
+                print("\n" + "="*80)
+                print("❌ SSL 连接错误")
+                print("="*80)
+                print("这通常是网络问题。建议解决方法：")
+                print("\n方法1: 检查代理设置")
+                print("  确保 .env 文件中配置了正确的代理:")
+                print("  HTTP_PROXY=http://127.0.0.1:7897")
+                print("  HTTPS_PROXY=http://127.0.0.1:7897")
+                print("\n方法2: 手动下载视频")
+                print(f"  1. 手动下载视频到 {self.output_dir}")
+                print(f"  2. 重命名为: {output_filename}.mp4")
+                print("  3. 重新运行脚本")
+                print("="*80 + "\n")
+
+            print(f"Error during download: {error_msg}", file=sys.stderr)
+            raise RuntimeError(f"Failed to download video: {error_msg}")
 
     def download_audio_only(
         self,
@@ -99,16 +179,23 @@ class YouTubeDownloader:
             "-x",  # Extract audio
             "--audio-format", "mp3",
             "-o", str(self.output_dir / (output_filename or "%(title)s.%(ext)s")),
+            "--socket-timeout", "30",           # Socket timeout
+            "--retries", "10",                  # Retry 10 times
+            "--fragment-retries", "10",         # Fragment retry
         ]
 
-        if cookie_file:
-            cookie_path = Path(cookie_file)
-            if not cookie_path.exists():
-                raise FileNotFoundError(f"Cookie file not found: {cookie_file}")
-            cmd.extend(["--cookies", str(cookie_path)])
+        # Add proxy if available
+        if self.proxy:
+            cmd.extend(["--proxy", self.proxy])
+
+        # Use browser cookies - this is the most reliable method
+        print("⚠️  直接从Chrome浏览器读取cookies（更可靠）")
+        cmd.extend(["--cookies-from-browser", "chrome"])
 
         print(f"Downloading audio from: {url}")
         print(f"Output directory: {self.output_dir}")
+        if self.proxy:
+            print(f"Using proxy: {self.proxy}")
 
         try:
             result = subprocess.run(
@@ -120,13 +207,26 @@ class YouTubeDownloader:
             print(result.stdout)
 
             # Find the downloaded file
-            downloaded_files = list(self.output_dir.glob("*.mp3"))
-            if not downloaded_files:
-                raise RuntimeError("Download completed but no file found")
-
-            downloaded_file = max(downloaded_files, key=lambda p: p.stat().st_mtime)
-            print(f"Downloaded: {downloaded_file}")
-            return downloaded_file
+            if output_filename:
+                # If output filename was specified, look for that specific file
+                expected_file = self.output_dir / f"{output_filename}.mp3"
+                if expected_file.exists():
+                    downloaded_file = expected_file
+                    print(f"✓ Downloaded: {downloaded_file}")
+                    return downloaded_file
+                else:
+                    raise RuntimeError(
+                        f"Expected file not found: {expected_file}\n"
+                        f"Download may have been skipped or failed. Please check yt-dlp output above."
+                    )
+            else:
+                # If no filename specified, find the most recently created file
+                downloaded_files = list(self.output_dir.glob("*.mp3"))
+                if not downloaded_files:
+                    raise RuntimeError("Download completed but no file found")
+                downloaded_file = max(downloaded_files, key=lambda p: p.stat().st_mtime)
+                print(f"✓ Downloaded: {downloaded_file}")
+                return downloaded_file
 
         except subprocess.CalledProcessError as e:
             print(f"Error during download: {e.stderr}", file=sys.stderr)

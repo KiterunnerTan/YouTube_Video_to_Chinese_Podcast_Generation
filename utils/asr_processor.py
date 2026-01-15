@@ -293,12 +293,34 @@ class Qwen3ASRProcessor:
             'model': self.model
         }
 
-    def save_result(self, result: Dict[str, Any], output_path: Path):
-        """Save transcription result to JSON file"""
+    def save_result(
+        self,
+        result: Dict[str, Any],
+        output_path: Path,
+        metadata: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Save transcription result to JSON file with optional metadata
+
+        Args:
+            result: ASR result data
+            output_path: Output file path
+            metadata: Optional metadata (podcast_name, youtube_url, etc.)
+        """
+        # Add metadata to result if provided
+        if metadata:
+            result['metadata'] = metadata
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
         print(f"Result saved to: {output_path}")
+
+        # Display metadata if present
+        if metadata:
+            print(f"  Metadata:")
+            for key, value in metadata.items():
+                print(f"    - {key}: {value}")
 
 
 if __name__ == "__main__":

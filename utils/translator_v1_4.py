@@ -2,8 +2,10 @@
 import json
 import time
 import os
+import hashlib
+from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import requests
 
 
@@ -53,9 +55,9 @@ class GeminiTranslatorV14:
             'key': self.api_key
         }
 
-        # Retry logic for proxy connection issues
+        # Retry logic for network connection issues
         max_retries = 3
-        retry_delay = 2
+        retry_delays = [5, 10, 15]  # 递增延迟：5秒、10秒、15秒
 
         for attempt in range(max_retries):
             try:
@@ -90,15 +92,23 @@ class GeminiTranslatorV14:
                 text = parts[0].get('text', '')
                 return text
 
-            except requests.exceptions.ProxyError as e:
+            except (
+                requests.exceptions.SSLError,        # SSL错误（如SSL握手失败）
+                requests.exceptions.ProxyError,      # 代理连接错误
+                requests.exceptions.ConnectionError, # 网络连接错误
+                requests.exceptions.Timeout          # 请求超时
+            ) as e:
                 if attempt < max_retries - 1:
-                    print(f"⚠ Proxy connection failed (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
-                    time.sleep(retry_delay)
+                    delay = retry_delays[attempt]
+                    print(f"⚠ 网络请求失败 (尝试 {attempt + 1}/{max_retries})，{delay}秒后重试...")
+                    print(f"  错误类型: {type(e).__name__}")
+                    time.sleep(delay)
                     continue
                 else:
-                    raise RuntimeError(f"API request failed after {max_retries} attempts: {str(e)}")
+                    raise RuntimeError(f"API请求失败，已重试{max_retries}次: {str(e)}")
 
             except requests.exceptions.RequestException as e:
+                # 其他HTTP错误（如400, 500等）直接抛出，不重试
                 raise RuntimeError(f"API request failed: {str(e)}")
 
     def _create_translation_prompt_v14(
@@ -122,7 +132,7 @@ class GeminiTranslatorV14:
 
 【v1.4核心理念】：让TTS引擎像真人一样理解和表达情绪
 
-这次翻译将使用Gemini 2.5 Pro TTS引擎，它具备强大的语义理解能力，能根据文本内容自动判断：
+这次翻译将使用MiniMax Speech 2.6 HD引擎，它具备强大的语义理解能力，能根据文本内容自动推断并表达：
 - 情绪表达（兴奋、好奇、强调、思考等）
 - 重音位置（关键数据、核心概念）
 - 语速变化（思考时慢、列举时快）
@@ -161,31 +171,55 @@ class GeminiTranslatorV14:
    - 长句拆分成短句，符合说话节奏
    - 适当重复强调重点（"非常非常重要"、"真的真的"）
 
-【第二层级：重音和停顿策略】⭐ v1.4简化版
+【第二层级：节奏和情绪表达】⭐ v1.4增强版
 
-**不用标记，用自然表达方式让TTS理解重音**：
+**核心原则**：用文本结构和自然表达让TTS理解节奏变化，不用标记
 
 1. **数字强调**（停顿 + 强调词组合）：
    - ❌ 不用：CPU的占比是**90%**（重读延长）
    - ✅ 改用：CPU的占比是……整整90%！
-   - ✅ 改用：今年是多少？不到15%！
+   - ✅ 改用：你猜是多少？……不到15%！
    - ✅ 改用：从……90%……直接掉到了……10%！
 
 2. **核心概念强调**（用自然强调词）：
    - ❌ 不用：**摩尔定律**（重读延长）
    - ✅ 改用：就是摩尔定律
-   - ✅ 改用：这个摩尔定律
-   - ✅ 改用：所谓的第一性原理
+   - ✅ 改用：这个所谓的摩尔定律
+   - ✅ 改用：大名鼎鼎的第一性原理
 
-3. **停顿标记**（保留，但更自然）：
-   - 思考停顿：……
-   - 列举停顿：用顿号、逗号自然分隔
+3. **停顿标记**（经常使用，控制节奏）：
+   - 思考停顿：……（在关键观点前）
+   - 转折停顿：但是……（在转折前）
    - 强调停顿：在关键数字、概念前后用……
+   - 列举停顿：用顿号、逗号自然分隔
 
-4. **语速自然变化**（不标记，让TTS理解）：
-   - 思考时：文本本身就会慢（"我记得六年前……"）
-   - 兴奋时：文本本身就会快（短句、感叹号）
-   - 列举时：文本结构决定（"不管是银行业、还是信用卡行业……"）
+4. **语速节奏变化**（⭐ 重点增强）：
+   **慢节奏场景**（用长句、停顿、思考词）：
+   - 思考时："你知道……我觉得这个问题呢……其实挺复杂的"
+   - 回忆时："我记得……那应该是……六年前的事了"
+   - 强调时："这一点……非常非常重要"
+
+   **快节奏场景**（用短句、感叹号、连续问答）：
+   - 兴奋时："真的！太棒了！我也这么想！"
+   - 列举时："不管是银行业、信用卡、还是零售业，都在用"
+   - 反问时："为什么？因为效果好啊！"
+
+   **节奏对比**（一句话内有快有慢）：
+   - "我们仔细想想……这个问题其实很简单！"（慢→快）
+   - "哇！太厉害了……但是……能持续吗？"（快→慢）
+   - "说实话……我一开始也不信，但数据摆在那儿！"（慢→快）
+
+5. **重读表达**（用词序和语气词，不用标记）：
+   - 前置强调："这个AI，它真的改变了一切"
+   - 副词强调："它真的、真的很重要"
+   - 反问强调："难道不是吗？当然是！"
+   - 对比强调："不是90%，是……整整99%！"
+
+6. **情绪起伏**（用文本表达，让TTS自然演绎）：
+   - 惊讶："什么？！居然是这样？"
+   - 质疑："真的吗……我有点不太确定"
+   - 兴奋："对对对！就是这个意思！"
+   - 深思："嗯……让我想想……确实有道理"
 
 【角色识别和风格】
 
@@ -246,18 +280,24 @@ speaker_1: 基本上就是从……90%……直接掉到了……10%！"
             else:
                 prompt += f"\n【上下文 - Segment {segment_idx}】:\n{formatted_text}\n"
 
-        prompt += """\n【输出要求 v1.4】
+        prompt += """\n【输出要求 v1.4增强版】
 
 1. 只翻译【需要翻译】标记的部分
 2. ⚠️ **只使用speaker_0和speaker_1** (绝对不能有speaker_2, speaker_3等)
 3. 使用speaker_X格式（如speaker_0:、speaker_1:）
 4. ⚠️ 完全不用情绪标记、重音标记
-5. ⚠️ 用自然语言表达重音（停顿+强调词:"整整90%"、"就是摩尔定律"）
-6. ⚠️ 适当保留停顿标记……（关键位置）
+5. ⚠️ **节奏变化**（核心要求）：
+   - 思考/强调时用慢节奏：长句+停顿+思考词（"你知道……我觉得……"）
+   - 兴奋/列举时用快节奏：短句+感叹号（"真的！太棒了！"）
+   - 一句话内有节奏对比：慢→快 或 快→慢
+   - 重读用自然强调词："整整90%"、"就是摩尔定律"、"大名鼎鼎的"
+6. ⚠️ **停顿标记……**：
+   - 经常使用！在关键观点前、数字前、转折前
+   - 不要吝啬停顿，它是节奏变化的关键
 7. ⚠️ 愉快/笑声场景自动添加"哈哈哈"、"（笑）"等语气词
-8. 确保添加了足够的自然对话元素（口头禅、互动）
-8. 每句话都符合真人说话的节奏
-9. 直接输出翻译结果，不要添加任何说明或注释
+8. 确保添加了足够的自然对话元素（口头禅、互动、反问）
+9. 每句话都符合真人说话的节奏，有快有慢，有轻有重
+10. 直接输出翻译结果，不要添加任何说明或注释
 
 开始翻译："""
 
@@ -319,16 +359,45 @@ speaker_1: 基本上就是从……90%……直接掉到了……10%！"
         print(f"All {len(translations)} segments translated successfully")
         return translations
 
-    def save_translations(self, translations: List[Dict[str, Any]], output_path: Path):
-        """Save translations to JSON file"""
+    def save_translations(
+        self,
+        translations: List[Dict[str, Any]],
+        output_path: Path,
+        asr_file_path: Optional[Path] = None,
+        podcast_name: Optional[str] = None
+    ):
+        """Save translations to JSON file with metadata for verification
+
+        Args:
+            translations: List of translation dictionaries
+            output_path: Output JSON file path
+            asr_file_path: Path to source ASR file (for hash verification)
+            podcast_name: Name of the podcast (optional)
+        """
         output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Compute ASR file hash for verification
+        asr_hash = None
+        if asr_file_path and asr_file_path.exists():
+            with open(asr_file_path, 'rb') as f:
+                asr_hash = hashlib.sha256(f.read()).hexdigest()[:16]  # First 16 chars
+
         result = {
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "asr_file": str(asr_file_path.name) if asr_file_path else None,
+                "asr_hash": asr_hash,
+                "podcast_name": podcast_name,
+                "translator_version": "v1.4"
+            },
             "total_segments": len(translations),
             "translations": translations
         }
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
         print(f"Translations saved to: {output_path}")
+        if asr_hash:
+            print(f"  ASR hash: {asr_hash}")
 
 
 if __name__ == "__main__":

@@ -100,15 +100,35 @@ class GeminiTTSGenerator:
 像一个真正的播客主播一样，充满感情和节奏感地朗读，而不是机械地念稿子。"""
 
         # 注意：Gemini TTS API可能不支持systemInstruction
-        # 我们将系统指令直接附加到文本前面，让TTS模型理解
-        enhanced_text = f"""请用专业播客主播的方式朗读以下内容。根据文本中的情绪标记调整你的语调、语速和情绪：
+        # v1.3A简化版：简洁的演绎指导，减少文本长度
+        enhanced_text = f"""你是一位顶级播客主播，要用富有表现力的方式朗读以下内容。
 
-- [平静地]：正常语速，平稳清晰
-- [兴奋地]：提高音量和语调，充满热情
-- [强调地]：放慢并加重，清晰有力
-- [思考地]：略微放慢，有犹豫感
-- [疑问地]：音调上扬
-- 【关键词】：重读并略微延长
+【v1.3A标记演绎指南】
+
+1. 简洁情绪标记 [情绪！音量！语速！] 的演绎方式：
+   - [非常兴奋！音量提高！语速稍快！] → 音量提高30%，语速加快20%，充满热情
+   - [特别强调！音量加重！语速放慢！] → 音量提高40%，语速减慢30%，清晰有力
+   - [深度思考！音量略降！语速放慢！] → 音量降低10%，语速减慢20%，有犹豫感
+   - [好奇疑问！音量提高！句尾音调上扬！] → 音量提高20%，句尾音调明显上扬
+   - [专业解释！音量正常！语速适中！] → 平稳清晰，有节奏感
+   - [平静陈述！音量正常！语速正常！] → 自然流畅
+
+2. 重音标记 **词语**（重读延长） 的处理：
+   - 音量提高40%，延长50%，加重语气
+
+3. 停顿标记的处理：
+   - …… → 自然停顿0.5秒（每句结束）
+
+4. 语速标记的处理：
+   - 【语速：放慢30%】→ 整句放慢30%
+
+⚠️ 关键要求：
+- 情绪表达要有力，不要含蓄
+- 重音要明显，像真人强调一样
+- 停顿必须执行
+- 像真实播客主播一样有感染力
+
+以下是需要朗读的内容：
 
 {text}"""
 
@@ -135,21 +155,36 @@ class GeminiTTSGenerator:
         }
 
         # Retry logic for proxy connection issues
-        max_retries = 3
-        retry_delay = 2
+        max_retries = 5
+        retry_delay = 3
 
         for attempt in range(max_retries):
             try:
                 print(f"Generating audio for text (length: {len(text)})...")
 
-                response = requests.post(
+                # Create a new session for each attempt to avoid connection reuse issues
+                session = requests.Session()
+                session.proxies = self.proxies if self.proxies else {}
+                session.verify = False
+
+                # Disable connection pooling to avoid reuse issues
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=1,
+                    pool_maxsize=1,
+                    max_retries=0
+                )
+                session.mount('http://', adapter)
+                session.mount('https://', adapter)
+
+                response = session.post(
                     url,
                     headers=headers,
                     json=payload,
                     params=params,
-                    proxies=self.proxies if self.proxies else None,
-                    timeout=120
+                    timeout=300  # 5 minutes timeout
                 )
+
+                session.close()
 
                 if response.status_code != 200:
                     raise RuntimeError(
