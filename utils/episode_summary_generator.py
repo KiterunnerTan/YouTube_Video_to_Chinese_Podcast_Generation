@@ -1,10 +1,38 @@
 """节目概述生成器 - 使用Gemini REST API总结ASR文字稿"""
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import json
 import os
+import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 import re
+
+
+def create_session_with_retries(max_retries=5, backoff_factor=1.0):
+    """
+    创建带有自动重试机制的requests session
+
+    Args:
+        max_retries: 最大重试次数
+        backoff_factor: 重试间隔因子（指数退避）
+    """
+    session = requests.Session()
+
+    retry_strategy = Retry(
+        total=max_retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "POST", "OPTIONS"],
+        raise_on_status=False
+    )
+
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+    return session
 
 
 class EpisodeSummaryGenerator:
@@ -25,6 +53,9 @@ class EpisodeSummaryGenerator:
             'http': os.environ.get('HTTP_PROXY', ''),
             'https': os.environ.get('HTTPS_PROXY', '')
         } if os.environ.get('HTTP_PROXY') else None
+
+        # 创建带有重试机制的session
+        self.session = create_session_with_retries(max_retries=5, backoff_factor=1.0)
 
         # Gemini REST API endpoint
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -172,24 +203,34 @@ class EpisodeSummaryGenerator:
 嘉宾：{guest_name}
 
 要求：
-1. 字数：约{target_length}字（可上下浮动15%）
+1. 字数：约{target_length + 30}字（可上下浮动15%）
 2. 风格：简练精彩、引人入胜、适合播客朗读，带有情绪和节奏变化
-3. 结构：
-   - 直接从本期核心内容开始（不要"欢迎收听"、"我是主持人"等开场语，因为开场白已说过）
-   - 概述2-3个核心讨论要点或亮点，总结出一段120个中文字左右的介绍，作为播客节目概述。所以总结要简练精彩，引人入胜，且适合播客风格，适合朗读
+3. 结构（⭐ v1.5新增嘉宾金句）：
+   - 直接从本期核心内容开始（不要"欢迎收听"、"我是主持人"等开场语）
+   - 概述2-3个核心讨论要点或亮点
+   - ⭐ **必须包含一句嘉宾金句**：从文字稿中提取嘉宾最有力量、最有洞见的一句话，用引号标注
    - 结尾：用自然过渡语句引入正式内容，例如"让我们一起来听听..."
 4. 语气：专业、热情、第一人称"我们"
 5. 情绪和节奏增强（⭐重点）：
    - 使用停顿标记（……）在关键观点前、转折处，增加节奏感
    - 在重要内容用感叹号（！）增强情绪
    - 适当使用疑问句（？）引发思考
-   - 有节奏变化：有慢有快，例如"想想看……AI技术发展这么快！那么未来会怎样？"
+   - 有节奏变化：有慢有快
 6. 避免：不要有标题、标签或元信息，直接输出可朗读的文本
+
+**嘉宾金句要求**：
+- 从文字稿中找出嘉宾说的最有力量、最有洞见、最能被引用的一句话
+- 用引号标注，如：正如他所说……"AI会改变一切！"
+- 金句应该简短有力（10-25字），能引发共鸣
+- 金句示例：
+  * "我们不是在做语音合成，我们是在让每个人都能成为创作者！"
+  * "未来五年，90%的工作都会被重新定义。"
+  * "你不会被AI淘汰，但你会被更会用AI的人淘汰！"
 
 文字稿：
 {transcript[:10000]}
 
-请生成节目概述（重点：要有情绪和节奏变化，使用停顿……、感叹！、疑问？等标记）：
+请生成节目概述（重点：要有情绪和节奏变化，必须包含嘉宾金句）：
 """
 
         # 使用Gemini Pro模型
@@ -199,7 +240,7 @@ class EpisodeSummaryGenerator:
             "contents": [
                 {
                     "parts": [
-                        {"text": f"{prompt}\n\n【重要】必须输出完整的120字概述，不要截断，不要输出思考过程或草稿。直接输出最终版本。"}
+                        {"text": f"{prompt}\n\n【重要】必须输出完整的约150字概述，不要截断，必须包含嘉宾金句，不要输出思考过程或草稿。直接输出最终版本。"}
                     ]
                 }
             ],
@@ -211,68 +252,95 @@ class EpisodeSummaryGenerator:
             }
         }
 
-        try:
-            print("正在调用Gemini REST API生成概述...")
+        # 增强的重试逻辑
+        max_retries = 5
+        retry_delays = [5, 10, 20, 30, 45]
 
-            response = requests.post(
-                url,
-                json=payload,
-                proxies=self.proxies,
-                timeout=60
-            )
+        for attempt in range(max_retries):
+            try:
+                print(f"正在调用Gemini REST API生成概述... (尝试 {attempt + 1}/{max_retries})")
 
-            if response.status_code == 200:
-                result = response.json()
+                response = self.session.post(
+                    url,
+                    json=payload,
+                    proxies=self.proxies,
+                    timeout=120
+                )
 
-                # 提取生成的文本
-                if 'candidates' in result and len(result['candidates']) > 0:
-                    candidate = result['candidates'][0]
+                if response.status_code == 200:
+                    result = response.json()
 
-                    # 检查是否有content字段
-                    if 'content' not in candidate:
-                        print(f"❌ 响应中缺少 'content' 字段")
-                        print(f"candidate keys: {list(candidate.keys())}")
-                        print(f"完整响应: {json.dumps(result, indent=2, ensure_ascii=False)}")
-                        return None
+                    # 提取生成的文本
+                    if 'candidates' in result and len(result['candidates']) > 0:
+                        candidate = result['candidates'][0]
 
-                    if 'parts' not in candidate['content']:
-                        print(f"❌ 响应中缺少 'parts' 字段")
-                        print(f"content keys: {list(candidate['content'].keys())}")
-                        print(f"完整candidate: {json.dumps(candidate, indent=2, ensure_ascii=False)}")
+                        # 检查是否有content字段
+                        if 'content' not in candidate:
+                            print(f"❌ 响应中缺少 'content' 字段")
+                            print(f"candidate keys: {list(candidate.keys())}")
+                            print(f"完整响应: {json.dumps(result, indent=2, ensure_ascii=False)}")
+                            return None
 
-                        # 检查是否因为安全过滤被阻止
-                        if 'finishReason' in candidate:
-                            print(f"⚠️  finishReason: {candidate['finishReason']}")
+                        if 'parts' not in candidate['content']:
+                            print(f"❌ 响应中缺少 'parts' 字段")
+                            print(f"content keys: {list(candidate['content'].keys())}")
+                            print(f"完整candidate: {json.dumps(candidate, indent=2, ensure_ascii=False)}")
 
-                        return None
+                            # 检查是否因为安全过滤被阻止
+                            if 'finishReason' in candidate:
+                                print(f"⚠️  finishReason: {candidate['finishReason']}")
 
-                    # 遍历所有parts，找到text类型的内容（跳过thoughts）
-                    summary = None
-                    for part in candidate['content']['parts']:
-                        if 'text' in part:
-                            summary = part['text'].strip()
-                            break
+                            return None
 
-                    if summary:
-                        print(f"\n✓ 概述生成成功")
-                        print(f"✓ 字数: {len(summary)} 字")
-                        print(f"\n{'-'*60}")
-                        print(summary)
-                        print(f"{'-'*60}\n")
-                        return summary
-                    else:
-                        print(f"❌ 未找到text内容")
-                        return None
+                        # 遍历所有parts，找到text类型的内容（跳过thoughts）
+                        summary = None
+                        for part in candidate['content']['parts']:
+                            if 'text' in part:
+                                summary = part['text'].strip()
+                                break
 
-            print(f"❌ 生成失败: {response.status_code}")
-            print(f"Response: {response.text[:500]}")
-            return None
+                        if summary:
+                            print(f"\n✓ 概述生成成功")
+                            print(f"✓ 字数: {len(summary)} 字")
+                            print(f"\n{'-'*60}")
+                            print(summary)
+                            print(f"{'-'*60}\n")
+                            return summary
+                        else:
+                            print(f"❌ 未找到text内容")
+                            return None
 
-        except Exception as e:
-            print(f"❌ 生成失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return None
+                print(f"❌ 生成失败: {response.status_code}")
+                print(f"Response: {response.text[:500]}")
+                return None
+
+            except (
+                requests.exceptions.SSLError,
+                requests.exceptions.ProxyError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout
+            ) as e:
+                if attempt < max_retries - 1:
+                    delay = retry_delays[attempt]
+                    print(f"⚠ 网络请求失败 (尝试 {attempt + 1}/{max_retries})，{delay}秒后重试...")
+                    print(f"  错误类型: {type(e).__name__}")
+                    # 重置session以清除可能损坏的连接
+                    self.session = create_session_with_retries(max_retries=5, backoff_factor=1.0)
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"❌ 生成失败: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    return None
+
+            except Exception as e:
+                print(f"❌ 生成失败: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                return None
+
+        return None
 
     def generate_from_files(
         self,

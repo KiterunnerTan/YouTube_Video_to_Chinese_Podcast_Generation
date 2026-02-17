@@ -52,7 +52,7 @@ voice_manager = VoiceManager(voice_config=voice_config)
 tts_generator = GeminiTTSGeneratorV14(
     api_key=Config.MINIMAX_API_KEY,
     group_id=Config.MINIMAX_GROUP_ID,
-    model_name="speech-2.6-hd",
+    model_name="speech-2.8-hd",
     voice_manager=voice_manager,
     enable_cache=True
 )

@@ -139,11 +139,16 @@ class VoiceManager:
 
 
 class GeminiTTSGeneratorV14:
+    # RPM 限制配置
+    RPM_LIMIT = 20  # MiniMax API 每分钟请求限制
+    REQUEST_INTERVAL = 3.0  # 每次请求后等待秒数 (60/20=3)
+    RATE_LIMIT_WAIT = 65  # 遇到限流时等待秒数
+
     def __init__(
         self,
         api_key: str,
         group_id: str,
-        model_name: str = "speech-2.6-hd",
+        model_name: str = "speech-2.8-hd",
         voice_manager: Optional[VoiceManager] = None,
         enable_cache: bool = True
     ):
@@ -160,13 +165,14 @@ class GeminiTTSGeneratorV14:
         self.api_key = api_key
         self.group_id = group_id
         self.model_name = model_name
-        self.base_url = "https://api.minimax.io"
+        self.base_url = "https://api.minimax.chat"
         self.voice_manager = voice_manager or VoiceManager()
         self.cache = AudioCache() if enable_cache else None
 
         print(f"✓ Using MiniMax TTS model: {model_name}")
         print(f"✓ Voice mapping: speaker_0={self.voice_manager.voice_mapping.get('speaker_0')}, "
               f"speaker_1={self.voice_manager.voice_mapping.get('speaker_1')}")
+        print(f"✓ Rate limit: {self.RPM_LIMIT} RPM, interval={self.REQUEST_INTERVAL}s")
         if self.cache:
             print(f"✓ Request caching enabled")
 
@@ -280,9 +286,9 @@ class GeminiTTSGeneratorV14:
             }
 
             # DEBUG: 打印实际发送的voice_id
-            print(f"  Segment {i+1}: speaker={segment.get('speaker')}, voice_id={segment['voice_id']}")
+            print(f"  Segment {i+1}/{len(segments)}: speaker={segment.get('speaker')}, voice_id={segment['voice_id']}")
 
-            # 重试机制：最多3次重试，指数退避
+            # 重试机制：最多3次重试
             max_retries = 3
             retry_count = 0
             success = False
@@ -297,6 +303,19 @@ class GeminiTTSGeneratorV14:
 
                     result = response.json()
 
+                    # 检查是否触发限流
+                    if "base_resp" in result:
+                        status_code = result["base_resp"].get("status_code", 0)
+                        if status_code == 1002:  # rate limit exceeded
+                            retry_count += 1
+                            if retry_count <= max_retries:
+                                print(f"    ⚠️  触发RPM限流 (尝试 {retry_count}/{max_retries})")
+                                print(f"    ⏳ 等待 {self.RATE_LIMIT_WAIT} 秒后重试...")
+                                time.sleep(self.RATE_LIMIT_WAIT)
+                                continue
+                            else:
+                                raise RuntimeError(f"Rate limit exceeded after {max_retries} retries")
+
                     if "data" not in result or "audio" not in result["data"]:
                         raise RuntimeError(f"No audio data in response: {result}")
 
@@ -305,6 +324,10 @@ class GeminiTTSGeneratorV14:
                     audio_bytes = bytes.fromhex(audio_hex)
                     audio_chunks.append(audio_bytes)
                     success = True
+
+                    # 成功后等待，避免触发限流（最后一个segment不用等）
+                    if i < len(segments) - 1:
+                        time.sleep(self.REQUEST_INTERVAL)
 
                 except (requests.exceptions.SSLError, requests.exceptions.ConnectionError,
                         requests.exceptions.Timeout) as e:

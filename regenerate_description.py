@@ -60,8 +60,8 @@ if youtube_url and youtube_url != "www.youtube.com":
             continue
 
 if not asr_file:
-    # 如果没找到匹配的，使用最新的 ASR 文件
-    asr_files = sorted(asr_dir.glob("qwen_asr_*.json"), key=lambda x: x.stat().st_mtime, reverse=True)
+    # 如果没找到匹配的，使用最新的 ASR 文件（包括 asr_processed.json）
+    asr_files = sorted(asr_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True)
     if asr_files:
         asr_file = asr_files[0]
         print(f"⚠️  未找到精确匹配，使用最新的ASR文件: {asr_file.name}")

@@ -2,8 +2,60 @@
 import subprocess
 import sys
 import os
+import re
+import json
 from pathlib import Path
 from typing import Optional
+
+
+def extract_channel_id(url: str, proxy: Optional[str] = None) -> Optional[str]:
+    """
+    从YouTube URL提取频道ID
+
+    Args:
+        url: YouTube视频URL
+        proxy: 代理URL
+
+    Returns:
+        频道ID (UC开头) 或 None
+    """
+    cmd = [
+        "yt-dlp",
+        url,
+        "--dump-json",
+        "--no-download",
+        "--socket-timeout", "30",
+    ]
+
+    if proxy:
+        cmd.extend(["--proxy", proxy])
+
+    # 使用浏览器cookies
+    cmd.extend(["--cookies-from-browser", "chrome"])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            info = json.loads(result.stdout)
+            channel_id = info.get('channel_id')
+            if channel_id:
+                print(f"✓ 提取到频道ID: {channel_id}")
+                return channel_id
+
+            # 备选：从uploader_id提取
+            uploader_id = info.get('uploader_id')
+            if uploader_id and uploader_id.startswith('UC'):
+                print(f"✓ 从uploader_id提取频道ID: {uploader_id}")
+                return uploader_id
+
+    except subprocess.TimeoutExpired:
+        print("⚠️  提取频道ID超时")
+    except json.JSONDecodeError:
+        print("⚠️  解析频道信息失败")
+    except Exception as e:
+        print(f"⚠️  提取频道ID失败: {e}")
+
+    return None
 
 
 class YouTubeDownloader:
@@ -47,6 +99,7 @@ class YouTubeDownloader:
         cmd = [
             "yt-dlp",
             url,
+            "--remote-components", "ejs:github",  # Fix YouTube n-parameter challenge
             "-f", "bestvideo+bestaudio/best",  # Best quality video+audio
             "--merge-output-format", "mp4",    # Merge to mp4
             "-o", str(self.output_dir / (output_filename or "%(title)s.%(ext)s")),
@@ -175,6 +228,7 @@ class YouTubeDownloader:
         cmd = [
             "yt-dlp",
             url,
+            "--remote-components", "ejs:github",  # Fix YouTube n-parameter challenge
             "-f", "bestaudio",
             "-x",  # Extract audio
             "--audio-format", "mp3",

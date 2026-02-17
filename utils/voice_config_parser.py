@@ -13,12 +13,12 @@ class VoiceConfigParser:
     """
 
     DEFAULT_VOICES = {
-        "speaker_0": "Inspirational_girl",
-        "speaker_1": "Deep_Voice_Man"
+        "speaker_0": "Chinese (Mandarin)_Crisp_Girl",
+        "speaker_1": "Deep-voiced gentleman"
     }
 
     @staticmethod
-    def parse_voice_config(prompt_file: Path = None) -> Dict[str, str]:
+    def parse_voice_config(prompt_file: Path = None) -> Optional[Dict[str, str]]:
         """
         解析音色配置
 
@@ -27,13 +27,14 @@ class VoiceConfigParser:
 
         Returns:
             音色映射字典，如 {"speaker_0": "Grounded_Grace", "speaker_1": "Credible_Alex"}
+            如果用户未配置，返回 None（由调用方决定使用默认值或智能分配）
         """
         if prompt_file is None:
             prompt_file = Path(__file__).parent.parent / "start_prompt.md"
 
         if not prompt_file.exists():
-            print(f"⚠️  未找到配置文件 {prompt_file}，使用默认音色")
-            return VoiceConfigParser.DEFAULT_VOICES.copy()
+            print(f"⚠️  未找到配置文件 {prompt_file}")
+            return None
 
         with open(prompt_file, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -57,10 +58,10 @@ class VoiceConfigParser:
 
             return voice_config
         else:
-            print(f"⚠️  未在 {prompt_file.name} 中找到音色配置，使用默认音色")
-            print(f"  提示：在文件中添加以下格式的配置行：")
+            print(f"⚠️  未在 {prompt_file.name} 中找到音色配置")
+            print(f"  提示：可在文件中添加以下格式手动指定音色：")
             print(f"  音色配置: speaker_0:{{Grounded_Grace}}, speaker_1:{{Credible_Alex}}")
-            return VoiceConfigParser.DEFAULT_VOICES.copy()
+            return None
 
     @staticmethod
     def validate_voice_names(voice_config: Dict[str, str]) -> bool:
@@ -73,13 +74,19 @@ class VoiceConfigParser:
         Returns:
             是否所有音色都有效
         """
-        # MiniMax 常用音色列表（可以扩展）
+        # MiniMax 常用音色列表（中国区 + 国际区）
         valid_voices = {
-            # 女声
+            # 中国区女声
+            "Chinese (Mandarin)_Crisp_Girl", "Chinese (Mandarin)_Gentle_Girl",
+
+            # 中国区男声
+            "Deep-voiced gentleman", "Chinese (Mandarin)_Male_Narrator",
+
+            # 国际区女声（保留兼容）
             "Inspirational_girl", "Grounded_Grace", "Wise_Woman",
             "Cute_Girl", "Female_Narrator", "Gentle_Girl",
 
-            # 男声
+            # 国际区男声（保留兼容）
             "Deep_Voice_Man", "Credible_Alex", "Determined_Man",
             "Male_Narrator", "Mature_Man", "Young_Man",
         }
@@ -98,4 +105,7 @@ if __name__ == "__main__":
     # 测试解析
     config = VoiceConfigParser.parse_voice_config()
     print(f"\n解析结果: {config}")
-    VoiceConfigParser.validate_voice_names(config)
+    if config:
+        VoiceConfigParser.validate_voice_names(config)
+    else:
+        print("未找到用户配置，将使用智能音色分配")

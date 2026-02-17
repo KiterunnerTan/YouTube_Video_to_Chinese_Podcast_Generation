@@ -2,8 +2,10 @@
 import requests
 import json
 import base64
+import time
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+from datetime import datetime
 
 
 class VoiceCloneManager:
@@ -19,7 +21,7 @@ class VoiceCloneManager:
         """
         self.api_key = api_key
         self.group_id = group_id
-        self.base_url = "https://api.minimax.io"
+        self.base_url = "https://api.minimax.chat"
 
     def upload_audio_file(self, audio_path: Path, purpose: str = "voice_clone") -> Optional[str]:
         """
@@ -143,7 +145,7 @@ class VoiceCloneManager:
         text: str,
         voice_id: str,
         output_path: Path,
-        model: str = "speech-2.6-hd",
+        model: str = "speech-2.8-hd",
         speed: float = 1.0
     ) -> bool:
         """
@@ -178,32 +180,63 @@ class VoiceCloneManager:
             }
         }
 
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
+        # 重试机制：处理 RPM 限流
+        max_retries = 3
+        rate_limit_wait = 65  # 限流等待时间
 
-            if response.status_code == 200:
-                result = response.json()
+        for attempt in range(max_retries + 1):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=90)
 
-                if 'data' in result and 'audio' in result['data']:
-                    # MiniMax返回hex编码的音频
-                    audio_hex = result['data']['audio']
-                    audio_bytes = bytes.fromhex(audio_hex)
+                if response.status_code == 200:
+                    result = response.json()
 
-                    # 保存音频
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(output_path, 'wb') as f:
-                        f.write(audio_bytes)
+                    # 检查是否触发限流
+                    if 'base_resp' in result:
+                        status_code = result['base_resp'].get('status_code', 0)
+                        if status_code == 1002:  # rate limit exceeded
+                            if attempt < max_retries:
+                                print(f"⚠️  触发RPM限流 (尝试 {attempt + 1}/{max_retries + 1})")
+                                print(f"⏳ 等待 {rate_limit_wait} 秒后重试...")
+                                time.sleep(rate_limit_wait)
+                                continue
+                            else:
+                                print(f"❌ 限流重试次数用尽")
+                                return False
 
-                    print(f"✓ 音频生成成功: {output_path}")
-                    print(f"✓ 文件大小: {len(audio_bytes) / 1024:.1f}KB")
-                    return True
+                    if 'data' in result and 'audio' in result['data']:
+                        # MiniMax返回hex编码的音频
+                        audio_hex = result['data']['audio']
+                        audio_bytes = bytes.fromhex(audio_hex)
 
-            print(f"❌ 生成失败: {response.text}")
-            return False
+                        # 保存音频
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(output_path, 'wb') as f:
+                            f.write(audio_bytes)
 
-        except Exception as e:
-            print(f"❌ 生成异常: {str(e)}")
-            return False
+                        print(f"✓ 音频生成成功: {output_path}")
+                        print(f"✓ 文件大小: {len(audio_bytes) / 1024:.1f}KB")
+                        return True
+
+                print(f"❌ 生成失败: {response.text}")
+                return False
+
+            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
+                if attempt < max_retries:
+                    wait_time = (2 ** (attempt + 1)) * 2
+                    print(f"⚠️  网络错误 (尝试 {attempt + 1}/{max_retries + 1}): {type(e).__name__}")
+                    print(f"⏳ 等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"❌ 网络错误重试次数用尽: {str(e)}")
+                    return False
+
+            except Exception as e:
+                print(f"❌ 生成异常: {str(e)}")
+                return False
+
+        return False
 
     def save_clone_info(self, clone_info: Dict[str, Any], output_file: Path):
         """
@@ -242,3 +275,118 @@ class VoiceCloneManager:
         except Exception as e:
             print(f"❌ 加载克隆信息失败: {str(e)}")
             return None
+
+    def batch_clone_speakers(
+        self,
+        speaker_audios: Dict[str, Path],
+        channel_id: str,
+        channel_name: str = "Unknown"
+    ) -> Dict[str, str]:
+        """
+        批量克隆多个speaker的音色
+
+        Args:
+            speaker_audios: speaker音频映射 {"speaker_0": Path, "speaker_1": Path}
+            channel_id: YouTube频道ID，用于生成唯一voice_id
+            channel_name: 频道名称
+
+        Returns:
+            音色映射 {"speaker_0": "voice_id_0", "speaker_1": "voice_id_1"}
+        """
+        print(f"\n{'='*60}")
+        print(f"批量克隆音色 - 频道: {channel_name}")
+        print(f"{'='*60}")
+        print(f"Speaker数量: {len(speaker_audios)}")
+
+        voice_mapping = {}
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+
+        for speaker_id, audio_path in speaker_audios.items():
+            # 生成唯一的voice_id: channel_speaker_timestamp
+            voice_id = f"v_{channel_id[:8]}_{speaker_id}_{timestamp}"
+            voice_name = f"{channel_name} - {speaker_id}"
+
+            print(f"\n克隆 {speaker_id}...")
+            clone_info = self.clone_voice(
+                audio_path=audio_path,
+                voice_id=voice_id,
+                voice_name=voice_name
+            )
+
+            if clone_info:
+                voice_mapping[speaker_id] = voice_id
+                print(f"✅ {speaker_id} 克隆成功: {voice_id}")
+            else:
+                print(f"❌ {speaker_id} 克隆失败，将使用预设音色")
+                # 克隆失败时使用预设音色
+                voice_mapping[speaker_id] = self._get_fallback_voice(speaker_id)
+
+            # 避免API限流
+            time.sleep(1)
+
+        print(f"\n{'='*60}")
+        print(f"批量克隆完成: {len(voice_mapping)}/{len(speaker_audios)} 成功")
+        print(f"{'='*60}")
+
+        return voice_mapping
+
+    def _get_fallback_voice(self, speaker_id: str) -> str:
+        """
+        获取预设的回退音色
+
+        Args:
+            speaker_id: speaker标识
+
+        Returns:
+            预设音色ID
+        """
+        fallback_voices = {
+            "speaker_0": "Inspirational_girl",
+            "speaker_1": "Deep_Voice_Man",
+            "speaker_2": "Wise_Woman",
+        }
+        return fallback_voices.get(speaker_id, "Deep_Voice_Man")
+
+    def test_voice_valid(self, voice_id: str) -> bool:
+        """
+        测试克隆音色是否仍然有效
+
+        Args:
+            voice_id: 要测试的voice_id
+
+        Returns:
+            是否有效
+        """
+        url = f"{self.base_url}/v1/t2a_v2?GroupId={self.group_id}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        # 用很短的测试文本
+        payload = {
+            "model": "speech-2.8-hd",
+            "text": "测试",
+            "voice_setting": {
+                "voice_id": voice_id,
+                "speed": 1.0
+            },
+            "audio_setting": {
+                "format": "mp3",
+                "sample_rate": 24000
+            }
+        }
+
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+
+            if response.status_code == 200:
+                result = response.json()
+                if 'data' in result and 'audio' in result['data']:
+                    return True
+
+            return False
+
+        except Exception:
+            return False
+

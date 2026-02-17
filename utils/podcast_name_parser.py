@@ -46,6 +46,31 @@ class PodcastNameParser:
         return cleaned_name
 
     @staticmethod
+    def parse_guest_name(start_prompt_file: Path = Path("start_prompt.md")) -> Optional[str]:
+        """从 start_prompt.md 解析嘉宾名
+
+        Args:
+            start_prompt_file: start_prompt.md 文件路径
+
+        Returns:
+            嘉宾名称，如果未找到则返回 None
+        """
+        if not start_prompt_file.exists():
+            return None
+
+        with open(start_prompt_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # 提取嘉宾名: 嘉宾是{嘉宾名}
+        pattern = r'嘉宾是\{([^}]+)\}'
+        match = re.search(pattern, content)
+
+        if not match:
+            return None
+
+        return match.group(1).strip()
+
+    @staticmethod
     def sanitize_filename(filename: str) -> str:
         """清理文件名，移除非法字符
 

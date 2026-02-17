@@ -2,12 +2,26 @@
 
 使用方法：
 python auto_generate_podcast.py
+
+v2.1更新：
+- 移除语音克隆（跨语言效果不佳）
+- 智能音色分配（性别检测 + 音高分析）
+- 使用高质量中文预设音色
+- 翻译和TTS优化器修复内容遗漏问题
+
+v2.0更新：
+- 基于原视频音色克隆
+- 动态翻译策略（单人独白/双人对话）
+- 大模型听感优化
+- 音色库自动复用
 """
 from pathlib import Path
 from config import Config
 import subprocess
 import json
 import tempfile
+import re
+import time
 from utils.podcast_name_parser import PodcastNameParser
 from utils.podcast_manager import PodcastManager
 import glob
@@ -27,9 +41,8 @@ def check_dependencies():
         print("请安装 ffmpeg: brew install ffmpeg (macOS) 或访问 https://ffmpeg.org/")
         exit(1)
 
-    # 检查必需的文件
+    # 检查必需的文件（音色库检查移到后面，克隆后会自动创建）
     required_files = [
-        ("output/prologue_voice_clone.json", "开场白音色配置文件"),
         ("music/music_1.m4a", "片头音乐文件"),
         ("music/music_2.m4a", "过渡音乐文件"),
     ]
@@ -48,6 +61,38 @@ def check_dependencies():
 
 check_dependencies()
 
+
+def concat_audio_files(input_files: list, output_file: str):
+    """使用concat协议合并音频文件（兼容所有FFmpeg版本）
+
+    Args:
+        input_files: 输入文件路径列表
+        output_file: 输出文件路径
+
+    Returns:
+        subprocess.CompletedProcess
+    """
+    if not input_files:
+        raise ValueError("输入文件列表不能为空")
+
+    # 创建文件列表
+    concat_list = Path("output/temp/concat_list.txt")
+    concat_list.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(concat_list, 'w', encoding='utf-8') as f:
+        for file in input_files:
+            f.write(f"file '{Path(file).absolute()}'\n")
+
+    # 使用concat协议合并
+    cmd = [
+        'ffmpeg', '-f', 'concat', '-safe', '0',
+        '-i', str(concat_list),
+        '-c', 'copy', '-y', str(output_file)
+    ]
+
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
 # 解析节目名
 try:
     PODCAST_NAME = PodcastNameParser.parse_podcast_name()
@@ -56,6 +101,50 @@ except Exception as e:
     print(f"❌ 解析节目名失败: {e}")
     print("使用默认名称: 未命名播客")
     PODCAST_NAME = "未命名播客"
+
+# 解析嘉宾名
+GUEST_NAME = PodcastNameParser.parse_guest_name()
+if GUEST_NAME:
+    print(f"🎤 嘉宾: {GUEST_NAME}")
+else:
+    GUEST_NAME = "未知嘉宾"
+    print(f"⚠️ 未找到嘉宾名，使用默认值: {GUEST_NAME}")
+
+
+# 解析 speaker 数量（用户手动指定）
+def parse_speaker_count():
+    """从 start_prompt.md 解析用户指定的 speaker 数量
+
+    Returns:
+        int: speaker 数量（1/2/3），默认为 2
+    """
+    try:
+        with open(Path("start_prompt.md"), 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # 匹配 "speaker数量: 2" 格式
+        pattern = r'speaker数量[:：]\s*(\d+)'
+        match = re.search(pattern, content)
+
+        if match:
+            count = int(match.group(1))
+            if count in [1, 2, 3]:
+                return count
+            else:
+                print(f"⚠️ speaker数量配置无效 ({count})，使用默认值 2")
+                return 2
+
+        # 未找到配置，返回默认值
+        return 2
+
+    except Exception as e:
+        print(f"⚠️ 解析speaker数量失败: {e}，使用默认值 2")
+        return 2
+
+
+USER_SPEAKER_COUNT = parse_speaker_count()
+print(f"🎙️ Speaker数量: {USER_SPEAKER_COUNT} ({'单人独白' if USER_SPEAKER_COUNT == 1 else '双人对话' if USER_SPEAKER_COUNT == 2 else '多人对话'})")
+
 
 # 智能查找ASR文件
 def find_latest_asr_file(podcast_name=None):
@@ -209,11 +298,101 @@ except FileNotFoundError as e:
     exit(1)
 
 print("=" * 80)
-print("🎙️ 完整播客自动生成流程")
+print("🎙️ 完整播客自动生成流程 v2.1")
 print("=" * 80)
 
 # ============================================================================
-# 步骤1: 生成开场白（增强版，2.2倍音量）
+# 步骤0: 识别Speaker数量 + 智能音色分配
+# ============================================================================
+print("\n步骤0: 识别Speaker数量 + 智能音色分配...")
+print("=" * 80)
+
+from utils.translator_v1_4 import count_speakers
+from utils.voice_config_parser import VoiceConfigParser
+from utils.speaker_voice_analyzer import SpeakerVoiceAnalyzer
+
+# 读取ASR文件
+with open(ASR_FILE, 'r', encoding='utf-8') as f:
+    asr_data_for_speakers = json.load(f)
+
+# 使用用户指定的 speaker 数量（不再自动检测）
+speaker_count = USER_SPEAKER_COUNT
+print(f"✓ 使用用户指定的 speaker 数量: {speaker_count}")
+
+# 获取YouTube URL（用于查找视频文件）
+youtube_url = None
+try:
+    with open(Path("start_prompt.md"), 'r', encoding='utf-8') as f:
+        content = f.read()
+    url_patterns = [
+        r'YouTube URL[:：]\s*(https?://[^\s\n]+)',
+        r'视频链接[:：]\s*(https?://[^\s\n]+)',
+        r'URL[:：]\s*(https?://[^\s\n]+)',
+    ]
+    for pattern in url_patterns:
+        match = re.search(pattern, content)
+        if match:
+            youtube_url = match.group(1).strip()
+            break
+except Exception:
+    pass
+
+# 音色分配策略：用户配置优先，否则智能分配
+auto_voice_mapping = {}
+
+# 1. 检查用户是否配置了音色
+user_voice_config = VoiceConfigParser.parse_voice_config()
+if user_voice_config:
+    print(f"✓ 使用用户配置的音色: {user_voice_config}")
+    auto_voice_mapping = user_voice_config
+else:
+    # 2. 智能音色分配（基于性别和音高检测）
+    print("未找到用户音色配置，执行智能音色分配...")
+
+    # 获取视频文件路径
+    video_file = None
+    if youtube_url:
+        manager = PodcastManager()
+        podcast_id = manager.find_podcast_by_url(youtube_url)
+        if podcast_id:
+            video_file = manager.get_video_path(podcast_id)
+
+    if video_file and video_file.exists():
+        try:
+            # 使用智能音色分析器
+            analyzer = SpeakerVoiceAnalyzer()
+            auto_voice_mapping = analyzer.auto_assign_voices(
+                video_path=video_file,
+                asr_result=asr_data_for_speakers,
+                speaker_count=speaker_count
+            )
+        except Exception as e:
+            print(f"⚠️  智能分析失败: {e}")
+
+    # 如果智能分配失败，使用默认配置
+    if not auto_voice_mapping:
+        print("⚠️  使用默认音色配置")
+        if speaker_count == 1:
+            auto_voice_mapping = {"speaker_0": "presenter_male"}
+        else:
+            auto_voice_mapping = {
+                "speaker_0": "presenter_male",
+                "speaker_1": "presenter_female"
+            }
+
+print(f"\n最终音色配置: {auto_voice_mapping}")
+print("=" * 80)
+
+# ============================================================================
+# 计算 ASR hash（用于缓存文件命名）
+# ============================================================================
+import hashlib
+with open(ASR_FILE, 'rb') as f:
+    current_asr_hash = hashlib.sha256(f.read()).hexdigest()[:16]
+print(f"✓ ASR hash: {current_asr_hash}")
+
+# ============================================================================
+# 步骤1: 生成开场白
 # ============================================================================
 print("\n步骤1: 生成开场白...")
 print("=" * 80)
@@ -228,39 +407,39 @@ PROLOGUE_TEXT = """大家好！欢迎收听……《西经东译》。
 
 欢迎关注同名公众号，获取更多内容！"""
 
-clone_info_file = Path("output/prologue_voice_clone.json")
 voice_clone_manager = VoiceCloneManager(
     api_key=Config.MINIMAX_API_KEY,
     group_id=Config.MINIMAX_GROUP_ID
 )
 
-clone_info = voice_clone_manager.load_clone_info(clone_info_file)
-if not clone_info:
-    print("❌ 未找到克隆音色，请先运行完整流程创建")
-    exit(1)
-
-voice_id = clone_info['voice_id']
+# 开场白使用克隆音色
+prologue_voice_id = "prologue_clone_cn_v1"  # 用户克隆的音色
 temp_prologue = Path("output/temp/prologue_raw.mp3")
+prologue_final = Path("output/temp/prologue_final.mp3")
 temp_prologue.parent.mkdir(parents=True, exist_ok=True)
 
-# 生成原始开场白
-voice_clone_manager.generate_audio_with_cloned_voice(
-    text=PROLOGUE_TEXT,
-    voice_id=voice_id,
-    output_path=temp_prologue,
-    speed=1.0
-)
+# 断点续传：检查开场白是否已存在
+if prologue_final.exists() and prologue_final.stat().st_size > 1000:
+    print(f"⏩ 开场白已存在，跳过生成")
+else:
+    print(f"✓ 开场白使用预设音色: {prologue_voice_id}")
+    # 生成原始开场白
+    voice_clone_manager.generate_audio_with_cloned_voice(
+        text=PROLOGUE_TEXT,
+        voice_id=prologue_voice_id,
+        output_path=temp_prologue,
+        speed=1.0
+    )
 
-# 应用1.1倍速 + 2.2倍音量
-prologue_final = Path("output/temp/prologue_final.mp3")
-cmd = [
-    'ffmpeg', '-i', str(temp_prologue),
-    '-filter:a', 'atempo=1.1,volume=2.6',
-    '-ar', '24000', '-ac', '1', '-b:a', '128k',
-    '-y', str(prologue_final)
-]
-subprocess.run(cmd, capture_output=True, check=True)
-print("✓ 开场白生成完成 (1.1倍速 + 2.2倍音量)")
+    # 应用1.1倍速 + 2.2倍音量
+    cmd = [
+        'ffmpeg', '-i', str(temp_prologue),
+        '-filter:a', 'atempo=1.05,volume=2.6',
+        '-ar', '24000', '-ac', '1', '-b:a', '128k',
+        '-y', str(prologue_final)
+    ]
+    subprocess.run(cmd, capture_output=True, check=True)
+    print("✓ 开场白生成完成 (1.1倍速 + 2.2倍音量)")
 
 # ============================================================================
 # 步骤2: 生成节目概要（增强情绪，2.2倍音量）
@@ -270,42 +449,66 @@ print("=" * 80)
 
 from utils.episode_summary_generator import EpisodeSummaryGenerator
 
-summary_generator = EpisodeSummaryGenerator(Config.GEMINI_API_KEY)
+# 概要缓存文件（基于ASR hash，确保每个播客独立）
+summary_cache_file = Path(f"output/temp/summary_text_{current_asr_hash}.txt")
+temp_summary = Path(f"output/temp/summary_raw_{current_asr_hash}.mp3")
+summary_final = Path(f"output/temp/summary_final_{current_asr_hash}.mp3")
 
-summary_text = summary_generator.generate_from_files(
-    start_prompt_file=Path("start_prompt.md"),
-    asr_file=ASR_FILE,
-    target_length=120
-)
+# 断点续传：检查概要是否已存在
+if summary_final.exists() and summary_final.stat().st_size > 1000:
+    print(f"⏩ 概要音频已存在，跳过生成")
+    # 读取缓存的概要文本
+    if summary_cache_file.exists():
+        with open(summary_cache_file, 'r', encoding='utf-8') as f:
+            summary_text = f.read()
+    else:
+        summary_text = ""
+else:
+    # 检查概要文案缓存
+    if summary_cache_file.exists():
+        print(f"⏩ 概要文案已缓存，跳过 API 调用")
+        with open(summary_cache_file, 'r', encoding='utf-8') as f:
+            summary_text = f.read()
+    else:
+        summary_generator = EpisodeSummaryGenerator(Config.GEMINI_API_KEY)
+        summary_text = summary_generator.generate_from_files(
+            start_prompt_file=Path("start_prompt.md"),
+            asr_file=ASR_FILE,
+            target_length=120
+        )
 
-if not summary_text:
-    print("⚠️  概要生成失败，使用默认概要")
-    summary_text = """本期播客将深入探讨人工智能领域的最新趋势和突破性进展。我们的嘉宾将分享他们在AI行业的独到见解……从技术创新到商业应用，从挑战到机遇！让我们一起来听听这场精彩的对话吧。"""
+        if not summary_text:
+            print("⚠️  概要生成失败，使用默认概要")
+            summary_text = """本期播客将深入探讨人工智能领域的最新趋势和突破性进展。我们的嘉宾将分享他们在AI行业的独到见解……从技术创新到商业应用，从挑战到机遇！让我们一起来听听这场精彩的对话吧。"""
 
-# 保存概要文本
+        # 保存概要文案缓存
+        summary_cache_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(summary_cache_file, 'w', encoding='utf-8') as f:
+            f.write(summary_text)
+        print(f"✓ 概要文案已缓存: {summary_cache_file.name}")
+
+    # 生成概要音频（使用开场白相同的音色）
+    voice_clone_manager.generate_audio_with_cloned_voice(
+        text=summary_text,
+        voice_id=prologue_voice_id,
+        output_path=temp_summary,
+        speed=1.0
+    )
+
+    # 应用1.1倍速 + 2.2倍音量
+    cmd = [
+        'ffmpeg', '-i', str(temp_summary),
+        '-filter:a', 'atempo=1.05,volume=2.6',
+        '-ar', '24000', '-ac', '1', '-b:a', '128k',
+        '-y', str(summary_final)
+    ]
+    subprocess.run(cmd, capture_output=True, check=True)
+    print("✓ 节目概要生成完成 (1.1倍速 + 2.2倍音量)")
+
+# 保存概要文本到标准位置（兼容旧逻辑）
 summary_file = Path("output/episode_summary.txt")
 with open(summary_file, 'w', encoding='utf-8') as f:
     f.write(summary_text)
-
-# 生成概要音频
-temp_summary = Path("output/temp/summary_raw.mp3")
-voice_clone_manager.generate_audio_with_cloned_voice(
-    text=summary_text,
-    voice_id=voice_id,
-    output_path=temp_summary,
-    speed=1.0
-)
-
-# 应用1.1倍速 + 2.2倍音量
-summary_final = Path("output/temp/summary_final.mp3")
-cmd = [
-    'ffmpeg', '-i', str(temp_summary),
-    '-filter:a', 'atempo=1.1,volume=2.6',
-    '-ar', '24000', '-ac', '1', '-b:a', '128k',
-    '-y', str(summary_final)
-]
-subprocess.run(cmd, capture_output=True, check=True)
-print("✓ 节目概要生成完成 (1.1倍速 + 2.2倍音量)")
 
 # ============================================================================
 # 步骤3: 处理ASR结果，生成formatted_text（关键步骤！）
@@ -338,7 +541,7 @@ else:
 print(f"✓ ASR段落数: {len(segments)}")
 
 # ============================================================================
-# 步骤4: 翻译并生成主音频（使用增强prompt）
+# 步骤4: 翻译并生成主音频（动态策略 + 听感优化 + 克隆音色）
 # ============================================================================
 print("\n步骤4: 翻译并生成主音频...")
 print("=" * 80)
@@ -346,16 +549,12 @@ print("=" * 80)
 from utils.translator_v1_4 import GeminiTranslatorV14
 from utils.tts_generator_v1_4 import GeminiTTSGeneratorV14, VoiceManager
 from utils.voice_config_parser import VoiceConfigParser
+from utils.tts_segment_optimizer import TTSSegmentOptimizer, parse_optimized_segments
 
 # 翻译（使用缓存如果存在，并验证hash）
 # 根据ASR文件名生成对应的翻译缓存文件名
 asr_basename = ASR_FILE.stem  # 获取文件名（不含扩展名）
 translations_output = Path(f"output/translations/{asr_basename}_translations_enhanced.json")
-
-# 计算当前ASR文件的hash
-import hashlib
-with open(ASR_FILE, 'rb') as f:
-    current_asr_hash = hashlib.sha256(f.read()).hexdigest()[:16]
 
 # 检查缓存翻译文件是否存在且有效
 use_cache = False
@@ -387,12 +586,17 @@ if translations_output.exists():
 if use_cache:
     translations = translations_data.get('translations', [])
 else:
-    print("开始翻译...")
+    print(f"开始翻译（speaker_count={speaker_count}）...")
     translator = GeminiTranslatorV14(
         api_key=Config.GEMINI_API_KEY,
         model_name="gemini-2.5-pro"
     )
-    translations = translator.translate_all_segments(segments, delay_between_calls=4.0)
+    # 使用动态翻译策略
+    translations = translator.translate_all_segments(
+        segments,
+        delay_between_calls=4.0,
+        speaker_count=speaker_count
+    )
     translator.save_translations(
         translations,
         translations_output,
@@ -400,13 +604,56 @@ else:
         podcast_name=PODCAST_NAME
     )
 
-# 生成TTS
-voice_config = VoiceConfigParser.parse_voice_config()
-voice_manager = VoiceManager(voice_config=voice_config)
+# ============================================================================
+# 步骤4.5: 听感优化（大模型优化TTS分段）
+# ============================================================================
+print("\n步骤4.5: 听感优化...")
+print("=" * 80)
+
+optimized_translations_output = Path(f"output/translations/{asr_basename}_optimized.json")
+
+# 检查是否有优化缓存
+use_optimized_cache = False
+if optimized_translations_output.exists():
+    try:
+        with open(optimized_translations_output, 'r', encoding='utf-8') as f:
+            optimized_data = json.load(f)
+        if optimized_data.get('metadata', {}).get('source_hash') == current_asr_hash:
+            print(f"✓ 使用缓存的听感优化结果")
+            use_optimized_cache = True
+            optimized_translations = optimized_data.get('translations', [])
+    except Exception:
+        pass
+
+if not use_optimized_cache:
+    print("执行听感优化...")
+    try:
+        optimizer = TTSSegmentOptimizer(api_key=Config.GEMINI_API_KEY)
+        optimized_translations = optimizer.optimize_translation_result(translations, delay_between_calls=2.0)
+
+        # 保存优化结果
+        optimized_result = {
+            "metadata": {
+                "source_hash": current_asr_hash,
+                "optimizer_version": "v2.0"
+            },
+            "translations": optimized_translations
+        }
+        with open(optimized_translations_output, 'w', encoding='utf-8') as f:
+            json.dump(optimized_result, f, ensure_ascii=False, indent=2)
+        print(f"✓ 听感优化完成，已保存到: {optimized_translations_output.name}")
+    except Exception as e:
+        print(f"⚠️  听感优化失败: {e}，使用原始翻译")
+        optimized_translations = translations
+
+# 生成TTS - 使用步骤0确定的音色配置
+print(f"✓ 使用音色配置: {auto_voice_mapping}")
+voice_manager = VoiceManager(voice_config=auto_voice_mapping)
+
 tts_generator = GeminiTTSGeneratorV14(
     api_key=Config.MINIMAX_API_KEY,
     group_id=Config.MINIMAX_GROUP_ID,
-    model_name="speech-2.6-hd",
+    model_name="speech-2.8-hd",
     voice_manager=voice_manager,
     enable_cache=True
 )
@@ -417,7 +664,9 @@ audio_dir = Path(f"output/audio_segments/final_{current_asr_hash}")
 # 关键修复：检查音频缓存是否比翻译文件更旧，如果是则删除
 if audio_dir.exists():
     audio_dir_mtime = audio_dir.stat().st_mtime
-    translation_file_mtime = translations_output.stat().st_mtime if translations_output.exists() else 0
+    # 检查优化后的翻译文件
+    check_file = optimized_translations_output if optimized_translations_output.exists() else translations_output
+    translation_file_mtime = check_file.stat().st_mtime if check_file.exists() else 0
 
     if audio_dir_mtime < translation_file_mtime:
         print(f"⚠️  音频缓存早于翻译文件，删除旧缓存...")
@@ -428,10 +677,29 @@ if audio_dir.exists():
 audio_dir.mkdir(parents=True, exist_ok=True)
 print(f"✓ 音频段目录: {audio_dir.name}")
 
+# 使用优化后的翻译结果
+translations_to_use = optimized_translations if 'optimized_translations' in dir() else translations
+
 audio_files = []
-for i, translation in enumerate(translations):
-    segment_id = translation['segment_id']
-    text = translation['translated_text']
+for i, translation in enumerate(translations_to_use):
+    segment_id = translation.get('segment_id', i)
+    text = translation.get('optimized_text', translation.get('translated_text', ''))
+
+    # 解析优化后的文本，跳过[SKIP]标记的内容
+    if '[SEG_' in text or '[SKIP]' in text:
+        segments_parsed, skipped = parse_optimized_segments(text)
+        if skipped:
+            print(f"  [Segment {segment_id}] 跳过 {len(skipped)} 个简单回应")
+        # 合并所有segment内容
+        combined_text = ""
+        for seg in segments_parsed:
+            combined_text += f"{seg['speaker']}: {seg['content']}\n"
+        text = combined_text.strip()
+
+    if not text.strip():
+        print(f"[Segment {segment_id}] ⏩ 跳过（空内容）")
+        continue
+
     audio_file = audio_dir / f"segment_{segment_id:04d}.mp3"
 
     # 断点续传：检查文件是否已存在
@@ -453,6 +721,11 @@ for i, translation in enumerate(translations):
     print(f"[Segment {segment_id}] 生成音频...")
     tts_generator.generate_audio(text=text, output_path=audio_file)
 
+    # 外层限速：每个大 segment 之间等待，避免触发 RPM 限流
+    # （tts_generator 内部已有限速，这里额外保护）
+    if i < len(translations_to_use) - 1:
+        time.sleep(3)
+
     duration_cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
                    '-of', 'default=noprint_wrappers=1:nokey=1', str(audio_file)]
     duration = float(subprocess.run(duration_cmd, capture_output=True, text=True).stdout.strip())
@@ -460,35 +733,25 @@ for i, translation in enumerate(translations):
     audio_files.append({'file': str(audio_file), 'duration': duration})
     print(f"  ✓ {duration:.1f}秒")
 
-# 合并主音频
-main_audio_temp = Path("output/temp/main_audio_raw.mp3")
-with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as f:
-    for af in audio_files:
-        # 使用绝对路径以确保ffmpeg能找到文件
-        abs_path = Path(af['file']).absolute()
-        f.write(f"file '{abs_path}'\n")
-    concat_list = f.name
-
-# 不使用 -c copy，而是重新编码以确保兼容性
-cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list,
-       '-ar', '24000', '-ac', '1', '-b:a', '128k', '-y', str(main_audio_temp)]
-result = subprocess.run(cmd, capture_output=True, text=True)
+# 合并主音频（使用 filter_complex 兼容 FFmpeg 8.0+）
+main_audio_temp = Path(f"output/temp/main_audio_raw_{current_asr_hash}.mp3")
+input_files = [af['file'] for af in audio_files]
+result = concat_audio_files(input_files, str(main_audio_temp))
 if result.returncode != 0:
     print(f"❌ FFmpeg concat 失败:")
     print(f"错误信息: {result.stderr}")
-    raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
-Path(concat_list).unlink()
+    raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
 
-# 应用1.1倍速 + 2.2倍音量
-main_audio_final = Path("output/temp/main_audio_final.mp3")
+# 应用1.01倍速 + 2.6倍音量
+main_audio_final = Path(f"output/temp/main_audio_final_{current_asr_hash}.mp3")
 cmd = [
     'ffmpeg', '-i', str(main_audio_temp),
-    '-filter:a', 'atempo=1.1,volume=2.6',
+    '-filter:a', 'atempo=1.05,volume=2.6',
     '-ar', '24000', '-ac', '1', '-b:a', '128k',
     '-y', str(main_audio_final)
 ]
 subprocess.run(cmd, capture_output=True, check=True)
-print("✓ 主音频生成完成 (1.1倍速 + 2.2倍音量)")
+print("✓ 主音频生成完成 (1.01倍速 + 2.6倍音量)")
 
 # ============================================================================
 # 步骤5: 准备音乐（转换格式、降低音量、添加渐出效果）
@@ -540,41 +803,35 @@ print(f"✓ 音乐文件准备完成 (音量0.4倍 + {fadeout_duration}秒渐出
 print("\n步骤6: 合并完整播客...")
 print("=" * 80)
 
-with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as f:
-    f.write(f"file '{music_1_final.absolute()}'\n")      # 片头音乐
-    f.write(f"file '{prologue_final.absolute()}'\n")     # 开场白
-    f.write(f"file '{music_2_final.absolute()}'\n")      # 过渡音乐
-    f.write(f"file '{summary_final.absolute()}'\n")      # 节目概要
-    f.write(f"file '{music_2_final.absolute()}'\n")      # 过渡音乐
-    f.write(f"file '{main_audio_final.absolute()}'\n")   # 主音频
-    f.write(f"file '{music_1_final.absolute()}'\n")      # 片尾音乐
-    concat_list = f.name
+# 准备合并文件列表（使用 filter_complex 兼容 FFmpeg 8.0+）
+final_input_files = [
+    str(music_1_final.absolute()),      # 片头音乐
+    str(prologue_final.absolute()),     # 开场白
+    str(music_2_final.absolute()),      # 过渡音乐
+    str(summary_final.absolute()),      # 节目概要
+    str(music_2_final.absolute()),      # 过渡音乐
+    str(main_audio_final.absolute()),   # 主音频
+    str(music_1_final.absolute()),      # 片尾音乐
+]
 
 # 创建输出目录并设置最终输出路径
 podcast_final_dir = Path("output/podcast_final")
 podcast_final_dir.mkdir(parents=True, exist_ok=True)
 final_output = podcast_final_dir / f"{PODCAST_NAME}.mp3"
 
-try:
-    # 不使用 -c copy，而是重新编码以确保兼容性
-    cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_list,
-           '-ar', '24000', '-ac', '1', '-b:a', '128k', '-y', str(final_output)]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"❌ FFmpeg 最终合并失败:")
-        print(f"错误信息: {result.stderr}")
-        raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+result = concat_audio_files(final_input_files, str(final_output))
+if result.returncode != 0:
+    print(f"❌ FFmpeg 最终合并失败:")
+    print(f"错误信息: {result.stderr}")
+    raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
 
-    duration_cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-                   '-of', 'default=noprint_wrappers=1:nokey=1', str(final_output)]
-    final_duration = float(subprocess.run(duration_cmd, capture_output=True, text=True).stdout.strip())
+duration_cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+               '-of', 'default=noprint_wrappers=1:nokey=1', str(final_output)]
+final_duration = float(subprocess.run(duration_cmd, capture_output=True, text=True).stdout.strip())
 
-    print("✓ 播客合并完成")
-    print(f"  总时长: {final_duration/60:.1f}分钟")
-    print(f"  文件: {final_output}")
-
-finally:
-    Path(concat_list).unlink()
+print("✓ 播客合并完成")
+print(f"  总时长: {final_duration/60:.1f}分钟")
+print(f"  文件: {final_output}")
 
 # ============================================================================
 # 步骤7: 生成播客介绍文案
@@ -625,6 +882,41 @@ if description:
     print(f"✓ 文案已保存: {desc_file}")
 
 # ============================================================================
+# 步骤8: 生成微信公众号文案
+# ============================================================================
+print("\n步骤8: 生成微信公众号文案...")
+print("=" * 80)
+
+# 读取 ASR 文字稿
+with open(ASR_FILE, 'r', encoding='utf-8') as f:
+    asr_data = json.load(f)
+
+# 提取文字稿内容
+if 'formatted_text' in asr_data:
+    asr_text = asr_data['formatted_text']
+elif 'results' in asr_data:
+    asr_text = '\n'.join([item.get('text', '') for item in asr_data['results']])
+else:
+    asr_text = str(asr_data)
+
+wx_description = desc_generator.generate_wx_description(
+    podcast_name=PODCAST_NAME,
+    guest_name=GUEST_NAME,
+    transcript=asr_text
+)
+
+if wx_description:
+    wx_output_dir = Path("output/wx_description")
+    wx_output_dir.mkdir(parents=True, exist_ok=True)
+    wx_output_file = wx_output_dir / f"{PODCAST_NAME}.md"
+    with open(wx_output_file, 'w', encoding='utf-8') as f:
+        f.write(wx_description)
+    print(f"✓ 微信公众号文案已保存: {wx_output_file}")
+else:
+    wx_output_file = None
+    print("⚠️ 微信公众号文案生成失败")
+
+# ============================================================================
 # 完成
 # ============================================================================
 print("\n" + "=" * 80)
@@ -634,13 +926,16 @@ print(f"\n📻 节目名称: {PODCAST_NAME}")
 print(f"\n📁 输出文件:")
 print(f"  - 播客音频: {final_output}")
 print(f"  - 节目介绍: {desc_file if description else '未生成'}")
+print(f"  - 微信公众号文案: {wx_output_file if wx_output_file else '未生成'}")
 print(f"\n🎵 播客结构:")
 print(f"  music_1(渐出) → 开场白 → music_2(渐出) → 概要 → music_2(渐出) → 主音频 → music_1(渐出)")
 print(f"\n🔊 音量设置:")
 print(f"  - 开场白/概要/主音频: 2.6倍音量")
 print(f"  - 音乐: 0.4倍音量")
 print(f"\n⚡ 倍速设置:")
-print(f"  - 所有音频: 1.1倍速（音乐除外）")
+print(f"  - 开场白/概要: 1.1倍速")
+print(f"  - 主音频: 1.01倍速")
+print(f"  - 音乐: 原速")
 print(f"\n🎶 音乐效果:")
 print(f"  - 所有音乐: 最后2秒渐出效果")
 print("\n" + "=" * 80)

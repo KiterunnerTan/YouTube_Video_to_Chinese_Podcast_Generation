@@ -1,0 +1,20 @@
+#!/bin/bash
+# AI播客生成器启动脚本
+
+# 获取脚本实际所在目录（处理符号链接）
+if [[ -L "${BASH_SOURCE[0]}" ]]; then
+    # 如果是符号链接，获取实际路径
+    SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+else
+    # 如果不是符号链接，使用普通方式
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+# 切换到项目目录
+cd "$SCRIPT_DIR" || exit 1
+
+# 激活虚拟环境
+source venv/bin/activate
+
+# 运行生成器
+python generate.py "$@"

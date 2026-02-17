@@ -1,15 +1,17 @@
-播客名字是{Vibe Coding Manifesto: Why Claude Code Isn't It & What Comes After the IDE}，嘉宾是{Steve Yegge}。
+播客名字是{Who will acquire OpenClaw? - OpenAI and Meta make big offers | Peter Steinberger and Lex Fridman}，嘉宾是{OpenClaw创始人Peter Steinberger}。
 
-YouTube URL: https://www.youtube.com/watch?v=zuJyJP517Uw
+YouTube URL: https://www.youtube.com/watch?v=NMBoNFDOr_o
 
-当前要转译的cookie文件目录地址：{/Users/jerrytan/Documents/cursor_project/ai_vedioToAudio/vedio_cookies/Why Claude Code Isn't It & What Comes After the IDE.txt}
+当前要转译的cookie文件目录地址：{/Users/jerrytan/Documents/cursor_project/ai_vedioToAudio/vedio_cookies/Who will acquire OpenClaw? - OpenAI and Meta make big offers | Peter Steinberger and Lex Fridman.txt}
 
-音色配置: speaker_0:{Chinese (Mandarin)_Crisp_Girl}, speaker_1:{Deep_Voice_Man}
+音色配置: speaker_0:{Chinese (Mandarin)_Crisp_Girl}, speaker_1:{male-qn-jingying}
+
+speaker数量: 2
 
 基于以上信息，给我自动生成完整的播客节目！
 
 
-节目概述prompt:该播客名字是{Vibe Coding Manifesto: Why Claude Code Isn't It & What Comes After the IDE}，嘉宾是{Steve Yegge}。请帮我根据文字稿，总结出一段120个中文字左右的节目概述，加入我的播客节目中。
+节目概述prompt:该播客名字是{Who will acquire OpenClaw? - OpenAI and Meta make big offers | Peter Steinberger and Lex Fridman}，嘉宾是{OpenClaw创始人Peter Steinberger}。
 
 要求：
 1. 直接从核心内容开始（不要"欢迎收听"、"我是主持人"等开场语，因为开场白已说过）

@@ -1,9 +1,17 @@
-"""播客节目文案生成器 - 使用Gemini生成专业播客介绍"""
+"""播客节目文案生成器 - 使用Gemini生成专业播客介绍
+
+v2.5更新：
+- 两阶段智能提取：先提取核心话题，再匹配准确时间戳
+- "您将了解到"：3-4个问句形式，无时间戳，无小标题
+- "时点内容"：6-8个话题，带时间戳和小标题，覆盖全部内容
+"""
 import requests
 import json
 import os
+import re
+import time
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
 
 class PodcastDescriptionGenerator:
@@ -68,7 +76,372 @@ class PodcastDescriptionGenerator:
                     full_transcript += segment.get('text', '') + "\n"
 
         print(f"✓ ASR文字稿长度: {len(full_transcript)} 字符")
-        return full_transcript.strip()
+
+        return full_transcript
+
+    def load_asr_transcript_with_timestamps(self, asr_file: Path) -> str:
+        """
+        加载带时间戳的ASR文字稿
+
+        Args:
+            asr_file: ASR结果JSON文件路径
+
+        Returns:
+            带时间戳的文字稿文本，格式如 "[00:00] 内容..."
+        """
+        with open(asr_file, 'r', encoding='utf-8') as f:
+            asr_data = json.load(f)
+
+        timestamped_transcript = ""
+
+        if 'segments' in asr_data:
+            for segment in asr_data['segments']:
+                # 获取 segment 开始时间（毫秒转分:秒）
+                start_ms = segment.get('start_time_ms', 0)
+                minutes = start_ms // 60000
+                seconds = (start_ms % 60000) // 1000
+                timestamp = f"[{minutes:02d}:{seconds:02d}]"
+
+                segment_text = ""
+                # 格式1: transcription.sentence 结构（Qwen3 ASR）
+                if 'transcription' in segment and 'sentence' in segment['transcription']:
+                    for sentence in segment['transcription']['sentence']:
+                        segment_text += sentence.get('text', '') + " "
+                # 格式2: items 结构
+                elif 'items' in segment:
+                    for item in segment['items']:
+                        segment_text += item.get('text', '') + " "
+                # 格式3: 直接 text 字段
+                elif 'text' in segment:
+                    segment_text = segment.get('text', '')
+
+                if segment_text.strip():
+                    timestamped_transcript += f"{timestamp} {segment_text.strip()}\n\n"
+
+        return timestamped_transcript
+
+    def load_translation_segments(self, asr_file: Path) -> List[Dict]:
+        """
+        加载翻译结果（带时间戳）
+
+        优先从翻译缓存文件加载，否则从ASR文件加载
+
+        Args:
+            asr_file: ASR结果JSON文件路径
+
+        Returns:
+            翻译段落列表，每个包含 start_time_ms, end_time_ms, translated_text
+        """
+        # 尝试从翻译缓存加载（更准确，包含中文翻译）
+        asr_basename = asr_file.stem
+        translations_file = Path(f"output/translations/{asr_basename}_translations_enhanced.json")
+        optimized_file = Path(f"output/translations/{asr_basename}_optimized.json")
+
+        # 优先使用优化后的翻译
+        if optimized_file.exists():
+            with open(optimized_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            segments = data.get('translations', [])
+            if segments:
+                print(f"✓ 加载优化翻译文件: {optimized_file.name}")
+                return segments
+
+        # 其次使用基础翻译
+        if translations_file.exists():
+            with open(translations_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            segments = data.get('translations', [])
+            if segments:
+                print(f"✓ 加载翻译文件: {translations_file.name}")
+                return segments
+
+        # 最后从ASR文件构建
+        print(f"⚠️ 未找到翻译文件，从ASR文件加载")
+        with open(asr_file, 'r', encoding='utf-8') as f:
+            asr_data = json.load(f)
+
+        segments = []
+        for segment in asr_data.get('segments', []):
+            text = ""
+            if 'transcription' in segment and 'sentence' in segment['transcription']:
+                for sentence in segment['transcription']['sentence']:
+                    text += sentence.get('text', '') + " "
+            elif 'text' in segment:
+                text = segment.get('text', '')
+
+            if text.strip():
+                segments.append({
+                    'start_time_ms': segment.get('start_time_ms', 0),
+                    'end_time_ms': segment.get('end_time_ms', 0),
+                    'translated_text': text.strip()
+                })
+
+        return segments
+
+    def extract_core_topics(
+        self,
+        podcast_name: str,
+        guest_name: str,
+        translation_segments: List[Dict]
+    ) -> Tuple[List[Dict], List[str]]:
+        """
+        阶段1：从完整翻译中提取核心话题和营销问题
+
+        Args:
+            podcast_name: 播客名称
+            guest_name: 嘉宾名称
+            translation_segments: 翻译段落列表
+
+        Returns:
+            (核心话题列表, 营销问题列表)
+            核心话题格式: [{"title": "标题", "description": "描述", "key_sentence": "可搜索的关键句"}]
+            营销问题格式: ["问句1", "问句2", ...]
+        """
+        print(f"\n{'='*60}")
+        print(f"阶段1: 提取核心话题和营销问题")
+        print(f"{'='*60}")
+
+        # 构建完整文字稿（带时间标记，供模型参考）
+        full_transcript = ""
+        for seg in translation_segments:
+            start_ms = seg.get('start_time_ms', 0)
+            minutes = start_ms // 60000
+            seconds = (start_ms % 60000) // 1000
+            text = seg.get('translated_text', seg.get('optimized_text', ''))
+            full_transcript += f"[{minutes:02d}:{seconds:02d}] {text}\n\n"
+
+        print(f"✓ 完整文字稿长度: {len(full_transcript)} 字符")
+
+        prompt = f"""你是一位资深播客内容分析专家。请分析以下播客访谈，提取核心内容。
+
+**播客名称**：{podcast_name}
+**嘉宾**：{guest_name}
+
+**完整文字稿**：
+{full_transcript}
+
+**任务1：提取6-8个核心话题**（用于"时点内容"导航目录）
+
+要求：
+- 每个话题必须是节目中的重要内容点
+- 话题应该均匀分布在整个节目中（不能都集中在前半段）
+- 每个话题提供一个"关键句"，这个句子必须是文字稿中实际出现的原文片段（用于后续时间戳匹配）
+- **标题格式**：采用"主题：副标题"结构，8-15字，简洁但有信息量
+- **描述要求**：50-80字，信息密度高，包含具体技术细节/数据/案例，直击要点
+
+**任务2：生成3-4个营销问题**（用于"您将了解到"部分）
+
+要求：
+- 用疑问句形式，引发读者好奇心
+- 不要带时间戳
+- 不要带小标题
+- 聚焦核心价值和悬念
+
+**输出格式（严格遵守JSON格式）**：
+
+```json
+{{
+  "topics": [
+    {{
+      "title": "主题：副标题（8-15字，如：架构第一层：通信网关的角色）",
+      "description": "详细描述（50-80字，包含具体技术细节、关键术语和核心概念，信息密度高）",
+      "key_sentence": "文字稿中的原文片段（用于时间戳匹配，15-50字）"
+    }}
+  ],
+  "marketing_questions": [
+    "问句1？",
+    "问句2？",
+    "问句3？"
+  ]
+}}
+```
+
+**标题示例**：
+- ✅ 好："OpenClaw简介：本地优先的AI代理"、"架构第一层：通信网关的角色"、"生态与扩展：核心技能与ClawHub"
+- ❌ 差："什么是 OpenClaw？"、"初识 OpenClaw：不止是改个名字那么简单"
+
+**描述示例**：
+- ✅ 好："深入解析OpenClaw的通信层，即网关。它作为系统的'中枢神经系统'，在后台持续运行，负责处理身份验证、会话管理，并内置适配器无缝连接Discord、Slack等多个消息平台。"
+- ❌ 差："探索作为系统'中枢神经系统'的网关层，它如何连接外部应用。"（太短，缺乏细节）
+- ❌ 差："New Machina 首次提出将 OpenClaw 架构划分为通信、推理、记忆和技能执行四个层面，为理解其复杂系统提供清晰的路线图，让开发者能够更好地掌握整体架构设计理念。"（太长，超过80字）
+
+请直接输出JSON，不要输出其他内容。"""
+
+        url = f"{self.base_url}/gemini-2.5-pro:generateContent?key={self.api_key}"
+
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.7,
+                "topP": 0.95,
+                "maxOutputTokens": 4096
+            }
+        }
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    print(f"⏳ 重试 {attempt}/{max_retries-1}...")
+                    time.sleep(5)
+
+                print("正在调用Gemini API提取核心话题...")
+
+                response = requests.post(
+                    url,
+                    json=payload,
+                    proxies=self.proxies,
+                    timeout=120
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    if 'candidates' in result and len(result['candidates']) > 0:
+                        text = result['candidates'][0]['content']['parts'][0].get('text', '')
+
+                        # 提取JSON部分
+                        json_match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+                        if json_match:
+                            json_str = json_match.group(1)
+                        else:
+                            # 尝试直接解析
+                            json_str = text.strip()
+
+                        try:
+                            data = json.loads(json_str)
+                            topics = data.get('topics', [])
+                            questions = data.get('marketing_questions', [])
+
+                            print(f"✓ 提取到 {len(topics)} 个核心话题")
+                            print(f"✓ 提取到 {len(questions)} 个营销问题")
+
+                            return topics, questions
+                        except json.JSONDecodeError as e:
+                            print(f"⚠️ JSON解析失败: {e}")
+                            print(f"原始响应: {text[:500]}")
+
+                print(f"❌ API调用失败: {response.status_code}")
+
+            except Exception as e:
+                print(f"❌ 提取失败 (尝试 {attempt+1}/{max_retries}): {str(e)}")
+
+        return [], []
+
+    def match_timestamps(
+        self,
+        topics: List[Dict],
+        translation_segments: List[Dict]
+    ) -> List[Dict]:
+        """
+        阶段2：为每个话题匹配准确的时间戳（优化版）
+
+        Args:
+            topics: 核心话题列表（包含key_sentence）
+            translation_segments: 翻译段落列表（包含时间戳）
+
+        Returns:
+            带时间戳的话题列表，按时间顺序排列，无重复时间戳
+        """
+        print(f"\n{'='*60}")
+        print(f"阶段2: 匹配时间戳")
+        print(f"{'='*60}")
+
+        # 构建全文索引（用于模糊匹配）
+        full_text_with_time = []
+        for seg in translation_segments:
+            start_ms = seg.get('start_time_ms', 0)
+            text = seg.get('translated_text', seg.get('optimized_text', ''))
+            full_text_with_time.append({
+                'start_ms': start_ms,
+                'text': text
+            })
+
+        # 按时间排序
+        full_text_with_time.sort(key=lambda x: x['start_ms'])
+
+        # 获取总时长用于分布优化
+        total_duration_ms = max([seg['start_ms'] for seg in full_text_with_time]) if full_text_with_time else 0
+
+        topics_with_timestamps = []
+        used_timestamps = set()  # 防止重复时间戳
+
+        for i, topic in enumerate(topics):
+            key_sentence = topic.get('key_sentence', '')
+            best_match_time = 0
+            best_match_score = 0.0
+
+            # 在每个段落中搜索关键句
+            for seg in full_text_with_time:
+                seg_text = seg['text']
+                current_time = seg['start_ms']
+
+                # 精确匹配
+                if key_sentence in seg_text:
+                    best_match_time = current_time
+                    best_match_score = 1.0  # 修复：使用1.0而不是100
+                    break
+
+                # 模糊匹配：计算关键词重叠度
+                key_words = set(key_sentence.replace('，', ' ').replace('。', ' ').replace('、', ' ').split())
+                seg_words = set(seg_text.replace('，', ' ').replace('。', ' ').replace('、', ' ').split())
+
+                # 过滤掉过短的词
+                key_words = {w for w in key_words if len(w) > 1}
+                seg_words = {w for w in seg_words if len(w) > 1}
+
+                if key_words:
+                    overlap = len(key_words & seg_words) / len(key_words)
+                    if overlap > best_match_score:
+                        best_match_score = overlap
+                        best_match_time = current_time
+
+            # 如果匹配度太低，使用时间分布策略
+            if best_match_score < 0.3 and total_duration_ms > 0:
+                # 将话题均匀分布在时间轴上
+                target_position = i / max(len(topics) - 1, 1)  # 0到1之间
+                target_time_ms = int(total_duration_ms * target_position)
+
+                # 找到最接近目标时间的段落
+                closest_seg = min(full_text_with_time,
+                                key=lambda x: abs(x['start_ms'] - target_time_ms))
+                best_match_time = closest_seg['start_ms']
+                best_match_score = 0.5  # 标记为分布匹配
+
+            # 避免重复时间戳
+            original_time = best_match_time
+            adjustment = 0
+            while best_match_time in used_timestamps and adjustment < 300000:  # 最多调整5分钟
+                adjustment += 30000  # 每次调整30秒
+                best_match_time = original_time + adjustment
+
+            used_timestamps.add(best_match_time)
+
+            # 转换时间格式
+            minutes = best_match_time // 60000
+            seconds = (best_match_time % 60000) // 1000
+            timestamp = f"[{minutes:02d}:{seconds:02d}]"
+
+            topics_with_timestamps.append({
+                'timestamp': timestamp,
+                'title': topic.get('title', ''),
+                'description': topic.get('description', ''),
+                'match_score': best_match_score,
+                'start_ms': best_match_time  # 用于排序
+            })
+
+            # 显示匹配结果
+            match_type = "精确匹配" if best_match_score == 1.0 else \
+                        "分布匹配" if best_match_score == 0.5 else "模糊匹配"
+            print(f"  {timestamp} {topic.get('title', '')} (匹配度: {best_match_score:.0%}, {match_type})")
+
+        # 按时间顺序排序
+        topics_with_timestamps.sort(key=lambda x: x['start_ms'])
+
+        # 移除临时字段
+        for topic in topics_with_timestamps:
+            topic.pop('start_ms', None)
+
+        return topics_with_timestamps
 
     def generate_title(
         self,
@@ -91,45 +464,31 @@ class PodcastDescriptionGenerator:
         print(f"生成播客节目标题")
         print(f"{'='*80}")
 
-        prompt = f"""
-你是一位资深的播客运营专家，擅长撰写吸引眼球的播客标题。
+        prompt = f"""你是顶尖自媒体运营专家，擅长撰写高点击率播客标题。
 
-请根据以下信息，为这期播客节目生成一个引人入胜的标题：
+**任务**：为这期播客生成3个吸引力标题
 
-**原始播客名称**：{podcast_name}
+**播客**：{podcast_name}
 **嘉宾**：{guest_name}
 
-**文字稿**（前8000字符）：
-{transcript[:8000]}
+**文字稿摘要**：
+{transcript[:5000]}
 
-**要求**：
+**标题要求**：
+1. 每个标题20-40字
+2. 必须包含：数据/比例 + 嘉宾观点/金句
+3. 结构参考：
+   - 数据+观点：90%的人放弃新年计划，因为他们搞错了改变的顺序
+   - 金句型："你还不是那个该成功的人" Dan Koe谈身份重塑
+   - 悬念型：健身者不需要自律？Dan Koe揭示成功者的秘密
 
-1. **字数限制**：必须严格控制在20-30个中文字（不包括标点）
-2. **吸睛效果**：
-   - 提炼最核心、最有冲击力的观点或信息
-   - 使用具体的数字、事件、矛盾或悬念
-   - 避免空泛描述，要有具体价值点
-3. **标题类型**（选择最合适的一种）：
-   - 数据型：突出关键数据或统计（例如：ChatGPT用户从4亿飙升到9亿）
-   - 观点型：提炼嘉宾的核心观点或预言（例如：Sam Altman预言AGI 2027到来）
-   - 对比型：展示矛盾或对比（例如：从API到企业级 OpenAI的增长秘密）
-   - 悬念型：制造疑问或好奇（例如：OpenAI如何应对红色警报挑战）
-4. **禁止**：
-   - 不要使用过多标点符号（可用冒号、顿号）
-   - 不要太泛泛，要具体
-   - 不要夸大或误导
-   - 不要少于20字或超过30字
+**输出格式**（严格遵守）：
+标题1: [内容]
+标题2: [内容]
+标题3: [内容]"""
 
-**参考示例（必须达到这个长度标准）**：
-- Sam Altman揭秘：ChatGPT用户暴涨到9亿 OpenAI如何制胜AI竞赛（29字）
-- OpenAI应对红色警报：从竞争危机到API业务超越ChatGPT（27字）
-- AI不会商品化 Sam Altman解读个性化和体验才是护城河（26字）
-
-请只输出标题本身（20-30字），不要输出任何解释、标记或额外内容。
-"""
-
-        # 使用 Flash 模型生成标题（更快，token 消耗更少）
-        url = f"{self.base_url}/gemini-2.0-flash-exp:generateContent?key={self.api_key}"
+        # 使用 Pro 模型生成标题（更稳定，输出更完整）
+        url = f"{self.base_url}/gemini-2.5-pro:generateContent?key={self.api_key}"
 
         payload = {
             "contents": [
@@ -140,9 +499,9 @@ class PodcastDescriptionGenerator:
                 }
             ],
             "generationConfig": {
-                "temperature": 0.9,
+                "temperature": 0.85,
                 "topP": 0.95,
-                "maxOutputTokens": 150,
+                "maxOutputTokens": 4096,
                 "candidateCount": 1
             }
         }
@@ -173,16 +532,63 @@ class PodcastDescriptionGenerator:
                     if 'candidates' in result and len(result['candidates']) > 0:
                         candidate = result['candidates'][0]
                         if 'content' in candidate and 'parts' in candidate['content']:
-                            title = candidate['content']['parts'][0].get('text', '').strip()
+                            titles_text = candidate['content']['parts'][0].get('text', '').strip()
 
-                            # 移除可能的引号
-                            title = title.strip('"').strip('"').strip("'")
+                            # 调试输出原始响应
+                            print(f"\n📝 Gemini原始响应:\n{titles_text}\n")
 
-                            print(f"\n✓ 标题生成成功")
-                            print(f"✓ 字数: {len(title)} 字")
-                            print(f"✓ 标题: {title}\n")
+                            # 解析3个备选标题
+                            import re
+                            lines = titles_text.split('\n')
+                            titles = []
+                            for line in lines:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                # 匹配多种格式：
+                                # "标题1: xxx" 或 "标题1：xxx"
+                                # "1. xxx" 或 "1、xxx" 或 "1: xxx"
+                                # "**标题1**: xxx"
+                                patterns = [
+                                    r'^标题[1-3][:：]\s*(.+)$',
+                                    r'^\*\*标题[1-3]\*\*[:：]?\s*(.+)$',
+                                    r'^[1-3][.、:：]\s*(.+)$',
+                                    r'^\[第[一二三]个标题[内容]?\]\s*(.+)$',
+                                ]
+                                for pattern in patterns:
+                                    match = re.match(pattern, line)
+                                    if match:
+                                        title = match.group(1).strip()
+                                        # 移除可能的引号和方括号
+                                        title = title.strip('"').strip('"').strip("'").strip('[]')
+                                        if len(title) >= 10:  # 确保标题有足够长度
+                                            titles.append(title)
+                                        break
 
-                            return title
+                            if titles:
+                                print(f"✓ 标题生成成功，共 {len(titles)} 个备选：")
+                                for i, t in enumerate(titles, 1):
+                                    print(f"  {i}. {t}")
+
+                                # 使用第一个标题
+                                title = titles[0]
+                                print(f"\n✓ 选用标题: {title}\n")
+                                return title
+                            else:
+                                # 如果解析失败，尝试提取第一行有意义的内容
+                                for line in lines:
+                                    line = line.strip()
+                                    if line and len(line) >= 15 and not line.startswith('**') and not line.startswith('#'):
+                                        title = line.strip('"').strip('"').strip("'")
+                                        print(f"\n✓ 标题生成成功（备用解析）")
+                                        print(f"✓ 标题: {title}\n")
+                                        return title
+                                # 最后的备选
+                                title = lines[0].strip() if lines else titles_text
+                                title = title.strip('"').strip('"').strip("'")
+                                print(f"\n✓ 标题生成成功")
+                                print(f"✓ 标题: {title}\n")
+                                return title
 
                 print(f"❌ 标题生成失败: {response.status_code}")
                 print(f"Response: {response.text[:500]}")
@@ -205,16 +611,20 @@ class PodcastDescriptionGenerator:
         podcast_name: str,
         guest_name: str,
         transcript: str,
-        video_url: Optional[str] = None
+        video_url: Optional[str] = None,
+        timestamped_transcript: Optional[str] = None,
+        translation_segments: Optional[List[Dict]] = None
     ) -> Optional[str]:
         """
-        生成专业的播客节目介绍文案
+        生成专业的播客节目介绍文案（两阶段智能提取）
 
         Args:
             podcast_name: 播客名称
             guest_name: 嘉宾名称
             transcript: ASR文字稿
             video_url: 原视频URL（可选）
+            timestamped_transcript: 带时间戳的文字稿（已弃用，保留兼容）
+            translation_segments: 翻译段落列表（用于两阶段提取）
 
         Returns:
             生成的文案，或None
@@ -223,10 +633,38 @@ class PodcastDescriptionGenerator:
         title = self.generate_title(podcast_name, guest_name, transcript)
 
         print(f"\n{'='*80}")
-        print(f"生成播客节目介绍文案")
+        print(f"生成播客节目介绍文案 (v2.5 两阶段提取)")
         print(f"{'='*80}")
         print(f"播客: {podcast_name}")
         print(f"嘉宾: {guest_name}\n")
+
+        # ========== 两阶段智能提取 ==========
+        topics_with_timestamps = []
+        marketing_questions = []
+
+        if translation_segments:
+            # 阶段1: 提取核心话题和营销问题
+            topics, questions = self.extract_core_topics(
+                podcast_name, guest_name, translation_segments
+            )
+
+            if topics:
+                # 阶段2: 匹配时间戳
+                topics_with_timestamps = self.match_timestamps(topics, translation_segments)
+
+            marketing_questions = questions
+
+        # ========== 构建最终prompt ==========
+        # 预构建"您将了解到"部分
+        questions_section = ""
+        if marketing_questions:
+            questions_section = "\n".join([f"- {q}" for q in marketing_questions])
+
+        # 预构建"时点内容"部分
+        topics_section = ""
+        if topics_with_timestamps:
+            for t in topics_with_timestamps:
+                topics_section += f"\n*   {t['timestamp']} **{t['title']}**\n    {t['description']}\n"
 
         prompt = f"""
 你是一位资深的播客运营专家，擅长撰写吸引人的播客节目介绍。
@@ -236,44 +674,45 @@ class PodcastDescriptionGenerator:
 **播客名称**：{podcast_name}
 **嘉宾**：{guest_name}
 
-**文字稿**（前10000字符）：
-{transcript[:10000]}
+**文字稿摘要**（前8000字符）：
+{transcript[:8000]}
+
+**预提取的营销问题**（直接使用，不要修改格式）：
+{questions_section if questions_section else "（需要你生成3-4个引发好奇的问句）"}
+
+**预提取的时点内容**（直接使用，不要修改格式）：
+{topics_section if topics_section else "（需要你生成6-8个带时间戳的话题）"}
 
 **要求**：
 
-1. **开篇段落**（严格1-2句话，不超过80字）：
+1. **开篇段落**（2句话，约80-100字）：
    - 用吸引人的方式引出核心亮点
    - 点出嘉宾的独特价值或核心观点
 
-2. **主体段落**（严格2段，每段恰好2句话，每段不超过100字）：
-   - 简洁介绍嘉宾背景和本期核心内容
+2. **故事/背景段落**（1段，约100-150字）：
+   - 讲述嘉宾/公司的故事或背景
    - 突出最精彩的观点、案例或数据
-   - 使用具体细节而非空泛描述
 
-3. **时点内容 | Key Topics** 部分（严格4-5个话题点）：
-   - 每个话题用简短标题（加粗）+ 恰好1句话说明（不超过35字）
-   - 只涵盖最核心的亮点
+3. **您将了解到：** 部分：
+   - 直接使用上面预提取的营销问题
+   - 格式：每行一个问句，以"-"开头
+   - **不要加小标题，不要加时间戳**
 
-4. **相关链接与资源** 部分：
-   - 如果有视频URL，添加：[视频来源]{video_url if video_url else 'www.youtube.com'}
+4. **💡时点内容 | Key Topics** 部分：
+   - **必须完全原样保留**上面预提取的时点内容，不要缩短、改写或重新组织描述
+   - 保持 [MM:SS] **标题** + 描述 的格式
+   - 每个描述保持50-80字的完整信息量
 
-5. **结尾免责声明**（固定格式）：
+5. **📺相关链接与资源**：
+   - [视频来源]{video_url if video_url else 'www.youtube.com'}
+
+6. **结尾免责声明**（固定格式）：
    本播客采用虚拟主持人进行播客翻译的音频制作，因此有可能会有一些地方听起来比较奇怪。如想了解更多信息，请关注微信公众号"西经东译"获取AI最新资讯。
 
-**关键限制（必须严格遵守）**：
-- 开篇：≤80字
-- 主体：2段，每段≤100字
-- Key Topics：4-5个，每个说明≤35字
-- **总长度必须严格控制在400-560字之间**
-
-**风格要求**：
-- 专业但不枯燥，有吸引力
-- 用具体数据和案例，避免空泛
-- 强调节目的独特价值
-- 语言简洁流畅，去除所有冗余
-
-**参考范例风格**（不要照搬内容）：
-在大多数企业还在争论 AI 是否过度炒作时，Block（原 Square）已经通过内部自研的 AI Agent "Goose" 实现了惊人的效率提升。本期节目，我们邀请到了 Block 的首席技术官 Dhanji R. Prasanna，深度解析这家金融科技巨头如何转型为 AI 原生企业。
+**关键要求**：
+- "您将了解到"部分：只有问句列表，无小标题，无时间戳
+- "时点内容"部分：有时间戳，有加粗标题，有详细描述（50-80字），**严禁缩短或改写描述**
+- 总长度控制在 800-1200 字之间
 
 请直接输出完整文案，不要输出思考过程或标记。
 """
@@ -292,7 +731,7 @@ class PodcastDescriptionGenerator:
             "generationConfig": {
                 "temperature": 0.8,
                 "topP": 0.95,
-                "maxOutputTokens": 4096,
+                "maxOutputTokens": 8192,
                 "candidateCount": 1
             }
         }
@@ -363,7 +802,7 @@ class PodcastDescriptionGenerator:
         video_url: Optional[str] = None
     ) -> Optional[str]:
         """
-        从文件生成播客介绍文案（一站式方法）
+        从文件生成播客介绍文案（一站式方法，v2.5两阶段提取）
 
         Args:
             start_prompt_file: start_prompt.md文件路径
@@ -374,7 +813,6 @@ class PodcastDescriptionGenerator:
             生成的文案，或None
         """
         # 解析播客信息
-        import re
         with open(start_prompt_file, 'r', encoding='utf-8') as f:
             content = f.read()
 
@@ -394,12 +832,266 @@ class PodcastDescriptionGenerator:
         # 加载文字稿
         transcript = self.load_asr_transcript(asr_file)
 
-        # 生成文案
+        # 加载翻译段落（用于两阶段提取）
+        translation_segments = self.load_translation_segments(asr_file)
+
+        # 生成文案（使用两阶段提取）
         description = self.generate_description(
+            podcast_name=podcast_name,
+            guest_name=guest_name,
+            transcript=transcript,
+            video_url=video_url,
+            translation_segments=translation_segments
+        )
+
+        return description
+
+    def generate_wx_description(
+        self,
+        podcast_name: str,
+        guest_name: str,
+        transcript: str,
+        video_url: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        生成公众号深度文案
+
+        Args:
+            podcast_name: 播客名称
+            guest_name: 嘉宾名称
+            transcript: ASR文字稿
+            video_url: 原视频URL（可选）
+
+        Returns:
+            生成的公众号文案（Markdown格式），或None
+        """
+        print(f"\n{'='*80}")
+        print(f"生成公众号深度文案")
+        print(f"{'='*80}")
+        print(f"播客: {podcast_name}")
+        print(f"嘉宾: {guest_name}\n")
+
+        prompt = f"""
+你是一位资深的公众号内容运营专家，擅长撰写深度解读文章。
+
+请根据以下播客访谈内容，生成一篇适合公众号发布的深度文章。
+
+**播客名称**：{podcast_name}
+**嘉宾**：{guest_name}
+
+**访谈文字稿**（前20000字符）：
+{transcript[:20000]}
+
+**文章结构要求**：
+
+## 一、备选标题（3个）
+提供3个不同风格的爆款标题：
+1. [数据型] 包含具体数字的标题
+2. [悬念型] 引发好奇的标题
+3. [金句型] 包含嘉宾金句的标题
+
+---
+
+## 二、开篇引入（约200字）
+- 用一个引人入胜的场景、问题或金句开篇
+- 可以是反常识的观点、惊人的数据、或嘉宾金句
+- 简要介绍本期访谈的核心主题和价值
+
+---
+
+## 三、嘉宾/公司背景（约300字）
+深度介绍嘉宾和公司背景：
+- 嘉宾的职业经历和成就
+- 公司的发展历程和里程碑
+- 在行业中的地位和影响力
+- 为什么这个人/公司值得关注
+
+---
+
+## 四、核心观点深度解读（约800-1000字）
+从访谈中提取 **4-5个核心观点**，每个观点包含：
+- **观点标题**（一句话总结，加粗）
+- **观点详解**（2-3段，展开说明背景、原因、方法）
+- **案例/数据支撑**（具体例子或数字）
+
+格式示例：
+### 观点1：[标题]
+[详细展开2-3段...]
+
+### 观点2：[标题]
+[详细展开2-3段...]
+
+---
+
+## 五、金句集锦（5-8句）
+从访谈中提取最有力量、最有洞见的金句，用引用格式：
+> "金句内容..."
+
+---
+
+## 六、关键数据一览
+用表格汇总访谈中提到的关键数据：
+| 指标 | 数据 | 说明 |
+|------|------|------|
+
+---
+
+## 七、延伸思考（约300字）
+基于访谈内容，提供更宏观的行业视角：
+- 这个观点对行业意味着什么？
+- 对从业者/读者有什么启发？
+- 2-3个关键启示点
+
+---
+
+## 八、结尾
+- 收听完整访谈的引导（播客链接：{video_url if video_url else 'www.youtube.com'}）
+- 互动引导（引导读者评论）
+- 关注引导（关注「西经东译」）
+
+**关键要求**：
+1. 总字数 **2000-2500字**
+2. 必须提取 **5-8个具体数字**
+3. 必须提取 **5-8句金句**
+4. 核心观点要 **深度展开**，不能只是一句话概括
+5. 语言风格：专业但不枯燥，有深度但易读
+6. 使用 Markdown 格式，适合公众号编辑器
+
+请直接输出完整文章，不要输出思考过程。
+"""
+
+        # 使用Gemini Pro模型
+        url = f"{self.base_url}/gemini-2.5-pro:generateContent?key={self.api_key}"
+
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.8,
+                "topP": 0.95,
+                "maxOutputTokens": 8192,
+                "candidateCount": 1
+            }
+        }
+
+        # 添加重试机制
+        max_retries = 3
+        retry_delay = 5
+
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    print(f"⏳ 重试 {attempt}/{max_retries-1}...")
+                    import time
+                    time.sleep(retry_delay)
+
+                print("正在调用Gemini API生成公众号文案...")
+
+                response = requests.post(
+                    url,
+                    json=payload,
+                    proxies=self.proxies,
+                    timeout=120
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+
+                    if 'candidates' in result and len(result['candidates']) > 0:
+                        candidate = result['candidates'][0]
+                        if 'content' in candidate and 'parts' in candidate['content']:
+                            wx_description = candidate['content']['parts'][0].get('text', '').strip()
+
+                            print(f"\n✓ 公众号文案生成成功")
+                            print(f"✓ 字数: {len(wx_description)} 字")
+
+                            return wx_description
+
+                print(f"❌ 生成失败: {response.status_code}")
+                print(f"Response: {response.text[:500]}")
+
+                if attempt < max_retries - 1:
+                    continue
+                return None
+
+            except Exception as e:
+                print(f"❌ 生成失败 (尝试 {attempt+1}/{max_retries}): {str(e)}")
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    import traceback
+                    traceback.print_exc()
+                    return None
+
+    def generate_wx_from_files(
+        self,
+        start_prompt_file: Path,
+        asr_file: Path,
+        video_url: Optional[str] = None,
+        output_dir: Optional[Path] = None
+    ) -> Optional[Path]:
+        """
+        从文件生成公众号文案并保存
+
+        Args:
+            start_prompt_file: start_prompt.md文件路径
+            asr_file: ASR结果文件路径
+            video_url: 原视频URL（可选）
+            output_dir: 输出目录（默认: wx_description/）
+
+        Returns:
+            生成的文件路径，或None
+        """
+        import re
+
+        # 解析播客信息
+        with open(start_prompt_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        podcast_pattern = r'播客名字是\{([^}]+)\}'
+        guest_pattern = r'嘉宾是\{([^}]+)\}'
+
+        podcast_match = re.search(podcast_pattern, content)
+        guest_match = re.search(guest_pattern, content)
+
+        podcast_name = podcast_match.group(1) if podcast_match else "未知播客"
+        guest_name = guest_match.group(1) if guest_match else "未知嘉宾"
+
+        print(f"✓ 播客名: {podcast_name}")
+        print(f"✓ 嘉宾: {guest_name}")
+
+        # 加载文字稿
+        transcript = self.load_asr_transcript(asr_file)
+
+        # 生成公众号文案
+        wx_description = self.generate_wx_description(
             podcast_name=podcast_name,
             guest_name=guest_name,
             transcript=transcript,
             video_url=video_url
         )
 
-        return description
+        if not wx_description:
+            return None
+
+        # 保存到文件
+        if output_dir is None:
+            output_dir = Path("wx_description")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 清理文件名中的非法字符
+        safe_name = re.sub(r'[<>:"/\\|?*]', '_', podcast_name)
+        output_file = output_dir / f"{safe_name}.md"
+
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(wx_description)
+
+        print(f"\n✓ 公众号文案已保存到: {output_file}")
+
+        return output_file
+
