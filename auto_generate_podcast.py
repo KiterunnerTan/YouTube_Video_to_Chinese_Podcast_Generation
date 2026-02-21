@@ -431,7 +431,7 @@ else:
         speed=1.0
     )
 
-    # 应用1.1倍速 + 2.2倍音量
+    # 应用1.05倍速 + 2.6倍音量
     cmd = [
         'ffmpeg', '-i', str(temp_prologue),
         '-filter:a', 'atempo=1.05,volume=2.6',
@@ -439,10 +439,10 @@ else:
         '-y', str(prologue_final)
     ]
     subprocess.run(cmd, capture_output=True, check=True)
-    print("✓ 开场白生成完成 (1.1倍速 + 2.2倍音量)")
+    print("✓ 开场白生成完成 (1.05倍速 + 2.6倍音量)")
 
 # ============================================================================
-# 步骤2: 生成节目概要（增强情绪，2.2倍音量）
+# 步骤2: 生成节目概要（增强情绪，2.6倍音量）
 # ============================================================================
 print("\n步骤2: 生成节目概要...")
 print("=" * 80)
@@ -495,7 +495,7 @@ else:
         speed=1.0
     )
 
-    # 应用1.1倍速 + 2.2倍音量
+    # 应用1.05倍速 + 2.6倍音量
     cmd = [
         'ffmpeg', '-i', str(temp_summary),
         '-filter:a', 'atempo=1.05,volume=2.6',
@@ -503,7 +503,7 @@ else:
         '-y', str(summary_final)
     ]
     subprocess.run(cmd, capture_output=True, check=True)
-    print("✓ 节目概要生成完成 (1.1倍速 + 2.2倍音量)")
+    print("✓ 节目概要生成完成 (1.05倍速 + 2.6倍音量)")
 
 # 保存概要文本到标准位置（兼容旧逻辑）
 summary_file = Path("output/episode_summary.txt")
@@ -742,7 +742,7 @@ if result.returncode != 0:
     print(f"错误信息: {result.stderr}")
     raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
 
-# 应用1.01倍速 + 2.6倍音量
+# 应用1.05倍速 + 2.6倍音量
 main_audio_final = Path(f"output/temp/main_audio_final_{current_asr_hash}.mp3")
 cmd = [
     'ffmpeg', '-i', str(main_audio_temp),
@@ -751,7 +751,7 @@ cmd = [
     '-y', str(main_audio_final)
 ]
 subprocess.run(cmd, capture_output=True, check=True)
-print("✓ 主音频生成完成 (1.01倍速 + 2.6倍音量)")
+print("✓ 主音频生成完成 (1.05倍速 + 2.6倍音量)")
 
 # ============================================================================
 # 步骤5: 准备音乐（转换格式、降低音量、添加渐出效果）
@@ -844,6 +844,63 @@ from utils.podcast_name_parser import PodcastNameParser
 
 desc_generator = PodcastDescriptionGenerator(Config.GEMINI_API_KEY)
 
+# 收集播客音频信息（用于时间戳换算）
+def get_audio_duration_ms(audio_path):
+    """获取音频时长（毫秒）"""
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+               '-of', 'default=noprint_wrappers=1:nokey=1', str(audio_path)]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return int(float(result.stdout.strip()) * 1000)
+    except:
+        return 0
+
+# 获取原视频时长（从ASR文件的metadata中获取，或从翻译段落推算）
+original_video_duration_ms = 0
+try:
+    with open(ASR_FILE, 'r', encoding='utf-8') as f:
+        asr_data = json.load(f)
+    # 尝试从metadata获取
+    if 'metadata' in asr_data and 'duration_ms' in asr_data['metadata']:
+        original_video_duration_ms = asr_data['metadata']['duration_ms']
+    # 否则从segments推算
+    elif 'segments' in asr_data:
+        for seg in asr_data['segments']:
+            end_ms = seg.get('end_time_ms', seg.get('start_time_ms', 0))
+            if end_ms > original_video_duration_ms:
+                original_video_duration_ms = end_ms
+    # 从翻译文件推算
+    if original_video_duration_ms == 0:
+        trans_file = Path("output/translations/asr_translations_enhanced.json")
+        if trans_file.exists():
+            with open(trans_file, 'r', encoding='utf-8') as f:
+                trans_data = json.load(f)
+            translations = trans_data.get('translations', [])
+            for seg in translations:
+                end_ms = seg.get('end_time_ms', seg.get('start_time_ms', 0))
+                if end_ms > original_video_duration_ms:
+                    original_video_duration_ms = end_ms
+except Exception as e:
+    print(f"⚠️ 获取原视频时长失败: {e}")
+
+# 构建播客音频信息
+podcast_audio_info = {
+    'original_video_duration_ms': original_video_duration_ms,
+    'main_audio_duration_ms': get_audio_duration_ms(main_audio_final),
+    'prologue_duration_ms': get_audio_duration_ms(prologue_final),
+    'summary_duration_ms': get_audio_duration_ms(summary_final),
+    'music_intro_duration_ms': get_audio_duration_ms(music_1_final),
+    'music_transition_duration_ms': get_audio_duration_ms(music_2_final),
+}
+
+print(f"📊 播客音频信息:")
+print(f"  原视频时长: {podcast_audio_info['original_video_duration_ms'] // 60000}:{(podcast_audio_info['original_video_duration_ms'] % 60000) // 1000:02d}")
+print(f"  主音频时长: {podcast_audio_info['main_audio_duration_ms'] // 60000}:{(podcast_audio_info['main_audio_duration_ms'] % 60000) // 1000:02d}")
+print(f"  开场白时长: {podcast_audio_info['prologue_duration_ms'] // 1000}秒")
+print(f"  概要时长: {podcast_audio_info['summary_duration_ms'] // 1000}秒")
+print(f"  片头音乐: {podcast_audio_info['music_intro_duration_ms'] // 1000}秒")
+print(f"  过渡音乐: {podcast_audio_info['music_transition_duration_ms'] // 1000}秒")
+
 # 从 start_prompt.md 提取 YouTube URL
 try:
     import re
@@ -868,7 +925,8 @@ except Exception:
 description = desc_generator.generate_from_files(
     start_prompt_file=Path("start_prompt.md"),
     asr_file=ASR_FILE,
-    video_url=youtube_url
+    video_url=youtube_url,
+    podcast_audio_info=podcast_audio_info
 )
 
 if description:
@@ -933,8 +991,7 @@ print(f"\n🔊 音量设置:")
 print(f"  - 开场白/概要/主音频: 2.6倍音量")
 print(f"  - 音乐: 0.4倍音量")
 print(f"\n⚡ 倍速设置:")
-print(f"  - 开场白/概要: 1.1倍速")
-print(f"  - 主音频: 1.01倍速")
+print(f"  - 开场白/概要/主音频: 1.05倍速")
 print(f"  - 音乐: 原速")
 print(f"\n🎶 音乐效果:")
 print(f"  - 所有音乐: 最后2秒渐出效果")

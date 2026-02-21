@@ -1,17 +1,17 @@
-播客名字是{Who will acquire OpenClaw? - OpenAI and Meta make big offers | Peter Steinberger and Lex Fridman}，嘉宾是{OpenClaw创始人Peter Steinberger}。
+播客名字是{Notion's CEO on if AI is really killing software companies},嘉宾是{Notion CEO Ivan Zhao}。
 
-YouTube URL: https://www.youtube.com/watch?v=NMBoNFDOr_o
+YouTube URL: https://www.youtube.com/watch?v=We7BZVKbCVw
 
-当前要转译的cookie文件目录地址：{/Users/jerrytan/Documents/cursor_project/ai_vedioToAudio/vedio_cookies/Who will acquire OpenClaw? - OpenAI and Meta make big offers | Peter Steinberger and Lex Fridman.txt}
+当前要转译的cookie文件目录地址：{/Users/jerrytan/Documents/cursor_project/ai_vedioToAudio/vedio_cookies/Notion's CEO on if AI is really killing software companies.txt}
 
-音色配置: speaker_0:{Chinese (Mandarin)_Crisp_Girl}, speaker_1:{male-qn-jingying}
+音色配置: speaker_0:{Chinese (Mandarin)_Crisp_Girl}, speaker_1:{male-qn-jingying}, speaker_2:{Deep_Voice_Man}
 
-speaker数量: 2
+speaker数量: 3
 
 基于以上信息，给我自动生成完整的播客节目！
 
 
-节目概述prompt:该播客名字是{Who will acquire OpenClaw? - OpenAI and Meta make big offers | Peter Steinberger and Lex Fridman}，嘉宾是{OpenClaw创始人Peter Steinberger}。
+节目概述prompt:该播客名字是{Head of Claude Code: What happens after coding is solved | Boris Cherny}，嘉宾是{Notion CEO Ivan Zhao}。
 
 要求：
 1. 直接从核心内容开始（不要"欢迎收听"、"我是主持人"等开场语，因为开场白已说过）

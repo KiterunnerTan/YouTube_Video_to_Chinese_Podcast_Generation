@@ -1,5 +1,10 @@
 """播客节目文案生成器 - 使用Gemini生成专业播客介绍
 
+v2.6更新：
+- 修复AI编造时间戳的问题
+- 添加时间戳比例换算功能（考虑开场白/概要偏移）
+- 时间戳上限检查，防止超出原视频时长
+
 v2.5更新：
 - 两阶段智能提取：先提取核心话题，再匹配准确时间戳
 - "您将了解到"：3-4个问句形式，无时间戳，无小标题
@@ -10,6 +15,7 @@ import json
 import os
 import re
 import time
+import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -35,6 +41,130 @@ class PodcastDescriptionGenerator:
 
         # Gemini REST API endpoint
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
+
+    @staticmethod
+    def get_audio_duration(audio_path: str) -> float:
+        """获取音频文件时长（秒）"""
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            audio_path
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return float(result.stdout.strip())
+        except Exception as e:
+            print(f"⚠️ 获取音频时长失败: {e}")
+            return 0.0
+
+    @staticmethod
+    def ms_to_timestamp(ms: int) -> str:
+        """毫秒转时间戳格式 [MM:SS] 或 [H:MM:SS]"""
+        total_seconds = ms // 1000
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+
+        if hours > 0:
+            return f"[{hours}:{minutes:02d}:{seconds:02d}]"
+        else:
+            return f"[{minutes:02d}:{seconds:02d}]"
+
+    @staticmethod
+    def timestamp_to_ms(timestamp: str) -> int:
+        """时间戳格式 [MM:SS] 或 [H:MM:SS] 转毫秒"""
+        # 先尝试匹配 [H:MM:SS] 格式
+        match = re.match(r'\[(\d+):(\d+):(\d+)\]', timestamp)
+        if match:
+            hours = int(match.group(1))
+            minutes = int(match.group(2))
+            seconds = int(match.group(3))
+            return (hours * 3600 + minutes * 60 + seconds) * 1000
+
+        # 再尝试匹配 [MM:SS] 格式
+        match = re.match(r'\[(\d+):(\d+)\]', timestamp)
+        if match:
+            minutes = int(match.group(1))
+            seconds = int(match.group(2))
+            return (minutes * 60 + seconds) * 1000
+        return 0
+
+    def convert_timestamps_for_podcast(
+        self,
+        topics_with_timestamps: List[Dict],
+        original_video_duration_ms: int,
+        main_audio_duration_ms: int,
+        prologue_duration_ms: int = 0,
+        summary_duration_ms: int = 0,
+        music_intro_duration_ms: int = 5000,
+        music_transition_duration_ms: int = 3000
+    ) -> List[Dict]:
+        """
+        按比例换算时间戳，并加上开场白/概要/音乐的偏移
+
+        播客结构：
+        music_1 → 开场白 → music_2 → 概要 → music_2 → 主音频 → music_1
+
+        Args:
+            topics_with_timestamps: 带时间戳的话题列表
+            original_video_duration_ms: 原视频总时长（毫秒）
+            main_audio_duration_ms: 主音频时长（毫秒）
+            prologue_duration_ms: 开场白时长（毫秒）
+            summary_duration_ms: 概要时长（毫秒）
+            music_intro_duration_ms: 片头音乐时长（毫秒）
+            music_transition_duration_ms: 过渡音乐时长（毫秒）
+
+        Returns:
+            换算后的话题列表
+        """
+        if original_video_duration_ms <= 0 or main_audio_duration_ms <= 0:
+            return topics_with_timestamps
+
+        # 计算比例
+        ratio = main_audio_duration_ms / original_video_duration_ms
+
+        # 计算偏移量（主音频之前的所有内容）
+        # 结构：music_1 → 开场白 → music_2 → 概要 → music_2 → 主音频
+        offset_ms = (
+            music_intro_duration_ms +      # 片头音乐
+            prologue_duration_ms +          # 开场白
+            music_transition_duration_ms +  # 过渡音乐1
+            summary_duration_ms +           # 概要
+            music_transition_duration_ms    # 过渡音乐2
+        )
+
+        print(f"\n📊 时间戳换算:")
+        print(f"  原视频时长: {original_video_duration_ms // 60000}:{(original_video_duration_ms % 60000) // 1000:02d}")
+        print(f"  主音频时长: {main_audio_duration_ms // 60000}:{(main_audio_duration_ms % 60000) // 1000:02d}")
+        print(f"  换算比例: {ratio:.2f}")
+        print(f"  偏移量: {offset_ms // 1000}秒")
+
+        converted_topics = []
+        for topic in topics_with_timestamps:
+            original_ts = topic.get('timestamp', '[00:00]')
+            original_ms = self.timestamp_to_ms(original_ts)
+
+            # 检查是否超出原视频时长
+            if original_ms > original_video_duration_ms:
+                print(f"  ⚠️ {original_ts} 超出原视频时长，截断到结尾")
+                original_ms = original_video_duration_ms
+
+            # 按比例换算主音频中的位置
+            scaled_time_ms = int(original_ms * ratio)
+
+            # 最终时间戳 = 偏移量 + 换算后的主音频位置
+            final_time_ms = offset_ms + scaled_time_ms
+
+            new_ts = self.ms_to_timestamp(final_time_ms)
+
+            converted_topic = topic.copy()
+            converted_topic['timestamp'] = new_ts
+            converted_topics.append(converted_topic)
+
+            print(f"  {original_ts} → {new_ts}")
+
+        return converted_topics
 
     def load_asr_transcript(self, asr_file: Path) -> str:
         """
@@ -226,8 +356,12 @@ class PodcastDescriptionGenerator:
 - 每个话题必须是节目中的重要内容点
 - 话题应该均匀分布在整个节目中（不能都集中在前半段）
 - 每个话题提供一个"关键句"，这个句子必须是文字稿中实际出现的原文片段（用于后续时间戳匹配）
-- **标题格式**：采用"主题：副标题"结构，8-15字，简洁但有信息量
-- **描述要求**：50-80字，信息密度高，包含具体技术细节/数据/案例，直击要点
+- **标题格式**：4-10字的名词短语，简洁概括主题，如"使命驱动的回归"、"指数级增长轨迹"、"编程的终结"
+- **描述要求**：60-100字，忠实呈现嘉宾的行为和观点，结构如下：
+  - [嘉宾名] + [行为动词] + [事实/经历]，并[行为动词2] + [嘉宾的观点/金句]
+  - 行为动词：报告称、透露、分享了、回顾了、指出、强调、认为、预测、将...比作
+  - 用引号突出嘉宾金句
+  - 不要添加主观解读（如"这揭示了"、"这表明"）
 
 **任务2：生成3-4个营销问题**（用于"您将了解到"部分）
 
@@ -243,8 +377,8 @@ class PodcastDescriptionGenerator:
 {{
   "topics": [
     {{
-      "title": "主题：副标题（8-15字，如：架构第一层：通信网关的角色）",
-      "description": "详细描述（50-80字，包含具体技术细节、关键术语和核心概念，信息密度高）",
+      "title": "小标题（4-10字名词短语）",
+      "description": "描述（60-100字，嘉宾名+行为动词+事实+观点）",
       "key_sentence": "文字稿中的原文片段（用于时间戳匹配，15-50字）"
     }}
   ],
@@ -256,14 +390,11 @@ class PodcastDescriptionGenerator:
 }}
 ```
 
-**标题示例**：
-- ✅ 好："OpenClaw简介：本地优先的AI代理"、"架构第一层：通信网关的角色"、"生态与扩展：核心技能与ClawHub"
-- ❌ 差："什么是 OpenClaw？"、"初识 OpenClaw：不止是改个名字那么简单"
-
 **描述示例**：
-- ✅ 好："深入解析OpenClaw的通信层，即网关。它作为系统的'中枢神经系统'，在后台持续运行，负责处理身份验证、会话管理，并内置适配器无缝连接Discord、Slack等多个消息平台。"
-- ❌ 差："探索作为系统'中枢神经系统'的网关层，它如何连接外部应用。"（太短，缺乏细节）
-- ❌ 差："New Machina 首次提出将 OpenClaw 架构划分为通信、推理、记忆和技能执行四个层面，为理解其复杂系统提供清晰的路线图，让开发者能够更好地掌握整体架构设计理念。"（太长，超过80字）
+- ✅ 好："切尔尼回顾了他在Cursor短暂两周后即重返Anthropic的经历，并指出'安全使命'是驱动他在AI领域工作的核心心理动力。"
+- ✅ 好："切尔尼透露，自2024年11月起他100%的代码由Claude Code编写，日均提交10-30个PR，并强调这让他能将精力集中于高层架构设计而非语法细节。"
+- ❌ 差："Boris分享了他的编程经历。"（太笼统，缺乏具体内容）
+- ❌ 差："这揭示了AI领域顶尖人才的深层驱动力。"（不要添加主观解读）
 
 请直接输出JSON，不要输出其他内容。"""
 
@@ -274,7 +405,7 @@ class PodcastDescriptionGenerator:
             "generationConfig": {
                 "temperature": 0.7,
                 "topP": 0.95,
-                "maxOutputTokens": 4096
+                "maxOutputTokens": 16384
             }
         }
 
@@ -407,19 +538,23 @@ class PodcastDescriptionGenerator:
                 best_match_time = closest_seg['start_ms']
                 best_match_score = 0.5  # 标记为分布匹配
 
-            # 避免重复时间戳
+            # 避免重复时间戳（限制调整范围，不超过总时长）
             original_time = best_match_time
             adjustment = 0
-            while best_match_time in used_timestamps and adjustment < 300000:  # 最多调整5分钟
+            max_adjustment = min(300000, total_duration_ms - original_time) if total_duration_ms > 0 else 300000
+            while best_match_time in used_timestamps and adjustment < max_adjustment:
                 adjustment += 30000  # 每次调整30秒
                 best_match_time = original_time + adjustment
 
+            # 确保时间戳不超过总时长
+            if total_duration_ms > 0 and best_match_time > total_duration_ms:
+                best_match_time = total_duration_ms
+                print(f"  ⚠️ 时间戳超出范围，截断到 {total_duration_ms}ms")
+
             used_timestamps.add(best_match_time)
 
-            # 转换时间格式
-            minutes = best_match_time // 60000
-            seconds = (best_match_time % 60000) // 1000
-            timestamp = f"[{minutes:02d}:{seconds:02d}]"
+            # 转换时间格式（使用统一的方法，支持超过1小时）
+            timestamp = self.ms_to_timestamp(best_match_time)
 
             topics_with_timestamps.append({
                 'timestamp': timestamp,
@@ -613,10 +748,11 @@ class PodcastDescriptionGenerator:
         transcript: str,
         video_url: Optional[str] = None,
         timestamped_transcript: Optional[str] = None,
-        translation_segments: Optional[List[Dict]] = None
+        translation_segments: Optional[List[Dict]] = None,
+        podcast_audio_info: Optional[Dict] = None
     ) -> Optional[str]:
         """
-        生成专业的播客节目介绍文案（两阶段智能提取）
+        生成专业的播客节目介绍文案（两阶段智能提取 + 时间戳换算）
 
         Args:
             podcast_name: 播客名称
@@ -625,6 +761,7 @@ class PodcastDescriptionGenerator:
             video_url: 原视频URL（可选）
             timestamped_transcript: 带时间戳的文字稿（已弃用，保留兼容）
             translation_segments: 翻译段落列表（用于两阶段提取）
+            podcast_audio_info: 播客音频信息（可选），用于时间戳换算
 
         Returns:
             生成的文案，或None
@@ -633,7 +770,7 @@ class PodcastDescriptionGenerator:
         title = self.generate_title(podcast_name, guest_name, transcript)
 
         print(f"\n{'='*80}")
-        print(f"生成播客节目介绍文案 (v2.5 两阶段提取)")
+        print(f"生成播客节目介绍文案 (v2.6 时间戳换算)")
         print(f"{'='*80}")
         print(f"播客: {podcast_name}")
         print(f"嘉宾: {guest_name}\n")
@@ -652,6 +789,18 @@ class PodcastDescriptionGenerator:
                 # 阶段2: 匹配时间戳
                 topics_with_timestamps = self.match_timestamps(topics, translation_segments)
 
+                # 阶段3: 时间戳换算（如果提供了播客音频信息）
+                if podcast_audio_info and topics_with_timestamps:
+                    topics_with_timestamps = self.convert_timestamps_for_podcast(
+                        topics_with_timestamps,
+                        original_video_duration_ms=podcast_audio_info.get('original_video_duration_ms', 0),
+                        main_audio_duration_ms=podcast_audio_info.get('main_audio_duration_ms', 0),
+                        prologue_duration_ms=podcast_audio_info.get('prologue_duration_ms', 0),
+                        summary_duration_ms=podcast_audio_info.get('summary_duration_ms', 0),
+                        music_intro_duration_ms=podcast_audio_info.get('music_intro_duration_ms', 5000),
+                        music_transition_duration_ms=podcast_audio_info.get('music_transition_duration_ms', 3000)
+                    )
+
             marketing_questions = questions
 
         # ========== 构建最终prompt ==========
@@ -662,9 +811,22 @@ class PodcastDescriptionGenerator:
 
         # 预构建"时点内容"部分
         topics_section = ""
+        has_timestamps = bool(topics_with_timestamps)
         if topics_with_timestamps:
             for t in topics_with_timestamps:
-                topics_section += f"\n*   {t['timestamp']} **{t['title']}**\n    {t['description']}\n"
+                topics_section += f"* {t['timestamp']} {t['title']}：{t['description']}\n"
+
+        # 根据是否有预提取的时间戳，构建不同的prompt
+        if has_timestamps:
+            topics_instruction = f"""**预提取的时点内容**（必须原样使用，禁止修改时间戳）：
+{topics_section}
+
+**⚠️ 重要警告**：时点内容中的时间戳 [MM:SS] 是精确计算的，禁止修改、调整或编造新的时间戳。"""
+        else:
+            # 没有预提取的时间戳时，不要求AI生成时间戳
+            topics_instruction = """**时点内容**：
+由于无法获取准确的时间戳，请只生成话题标题和描述，不要添加时间戳。
+格式：小标题：描述（60-100字，不要加粗）"""
 
         prompt = f"""
 你是一位资深的播客运营专家，擅长撰写吸引人的播客节目介绍。
@@ -680,8 +842,7 @@ class PodcastDescriptionGenerator:
 **预提取的营销问题**（直接使用，不要修改格式）：
 {questions_section if questions_section else "（需要你生成3-4个引发好奇的问句）"}
 
-**预提取的时点内容**（直接使用，不要修改格式）：
-{topics_section if topics_section else "（需要你生成6-8个带时间戳的话题）"}
+{topics_instruction}
 
 **要求**：
 
@@ -699,9 +860,10 @@ class PodcastDescriptionGenerator:
    - **不要加小标题，不要加时间戳**
 
 4. **💡时点内容 | Key Topics** 部分：
-   - **必须完全原样保留**上面预提取的时点内容，不要缩短、改写或重新组织描述
-   - 保持 [MM:SS] **标题** + 描述 的格式
-   - 每个描述保持50-80字的完整信息量
+   - **必须完全原样保留**上面预提取的时点内容
+   - {"保持 * [MM:SS] 小标题：描述 的格式（不要加粗），禁止修改时间戳" if has_timestamps else "只使用 小标题：描述 的格式，不要添加时间戳"}
+   - 每个描述保持60-100字的完整信息量
+   - **严禁缩短、改写描述或编造新的时间戳**
 
 5. **📺相关链接与资源**：
    - [视频来源]{video_url if video_url else 'www.youtube.com'}
@@ -711,7 +873,8 @@ class PodcastDescriptionGenerator:
 
 **关键要求**：
 - "您将了解到"部分：只有问句列表，无小标题，无时间戳
-- "时点内容"部分：有时间戳，有加粗标题，有详细描述（50-80字），**严禁缩短或改写描述**
+- "时点内容"部分：{"有时间戳（必须使用预提取的，禁止编造）" if has_timestamps else "无时间戳"}，格式为 * [时间戳] 小标题：描述（不要加粗）
+- **严禁编造或修改时间戳**
 - 总长度控制在 800-1200 字之间
 
 请直接输出完整文案，不要输出思考过程或标记。
@@ -799,15 +962,25 @@ class PodcastDescriptionGenerator:
         self,
         start_prompt_file: Path,
         asr_file: Path,
-        video_url: Optional[str] = None
+        video_url: Optional[str] = None,
+        podcast_audio_info: Optional[Dict] = None
     ) -> Optional[str]:
         """
-        从文件生成播客介绍文案（一站式方法，v2.5两阶段提取）
+        从文件生成播客介绍文案（一站式方法，v2.6时间戳换算）
 
         Args:
             start_prompt_file: start_prompt.md文件路径
             asr_file: ASR结果文件路径
             video_url: 原视频URL（可选）
+            podcast_audio_info: 播客音频信息（可选），用于时间戳换算
+                {
+                    'original_video_duration_ms': 原视频时长（毫秒）,
+                    'main_audio_duration_ms': 主音频时长（毫秒）,
+                    'prologue_duration_ms': 开场白时长（毫秒）,
+                    'summary_duration_ms': 概要时长（毫秒）,
+                    'music_intro_duration_ms': 片头音乐时长（毫秒）,
+                    'music_transition_duration_ms': 过渡音乐时长（毫秒）
+                }
 
         Returns:
             生成的文案，或None
@@ -841,7 +1014,8 @@ class PodcastDescriptionGenerator:
             guest_name=guest_name,
             transcript=transcript,
             video_url=video_url,
-            translation_segments=translation_segments
+            translation_segments=translation_segments,
+            podcast_audio_info=podcast_audio_info
         )
 
         return description
