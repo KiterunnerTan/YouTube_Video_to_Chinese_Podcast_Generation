@@ -194,7 +194,7 @@ class PodcastDescriptionGenerator:
         if 'segments' in asr_data:
             for segment in asr_data['segments']:
                 # 格式1: transcription.sentence 结构（Qwen3 ASR）
-                if 'transcription' in segment and 'sentence' in segment['transcription']:
+                if 'transcription' in segment and segment['transcription'] and 'sentence' in segment['transcription']:
                     for sentence in segment['transcription']['sentence']:
                         full_transcript += sentence.get('text', '') + " "
                 # 格式2: items 结构
@@ -234,7 +234,7 @@ class PodcastDescriptionGenerator:
 
                 segment_text = ""
                 # 格式1: transcription.sentence 结构（Qwen3 ASR）
-                if 'transcription' in segment and 'sentence' in segment['transcription']:
+                if 'transcription' in segment and segment['transcription'] and 'sentence' in segment['transcription']:
                     for sentence in segment['transcription']['sentence']:
                         segment_text += sentence.get('text', '') + " "
                 # 格式2: items 结构
@@ -293,7 +293,7 @@ class PodcastDescriptionGenerator:
         segments = []
         for segment in asr_data.get('segments', []):
             text = ""
-            if 'transcription' in segment and 'sentence' in segment['transcription']:
+            if 'transcription' in segment and segment['transcription'] and 'sentence' in segment['transcription']:
                 for sentence in segment['transcription']['sentence']:
                     text += sentence.get('text', '') + " "
             elif 'text' in segment:

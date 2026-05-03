@@ -128,8 +128,11 @@ class EpisodeSummaryGenerator:
 
         if 'segments' in asr_data:
             for segment in asr_data['segments']:
+                # 跳过 transcription 为 None 的 segment（可能是过短的音频片段）
+                if segment.get('transcription') is None:
+                    continue
                 # 格式1: transcription.sentence 结构（Qwen3 ASR）
-                if 'transcription' in segment and 'sentence' in segment['transcription']:
+                if 'transcription' in segment and isinstance(segment['transcription'], dict) and 'sentence' in segment['transcription']:
                     for sentence in segment['transcription']['sentence']:
                         full_transcript += sentence.get('text', '') + " "
                 # 格式2: items 结构

@@ -20,13 +20,13 @@ class VoiceConfigParser:
     @staticmethod
     def parse_voice_config(prompt_file: Path = None) -> Optional[Dict[str, str]]:
         """
-        解析音色配置
+        解析音色配置（支持动态数量的speaker）
 
         Args:
             prompt_file: start_prompt.md 文件路径（默认为项目根目录）
 
         Returns:
-            音色映射字典，如 {"speaker_0": "Grounded_Grace", "speaker_1": "Credible_Alex"}
+            音色映射字典，如 {"speaker_0": "...", "speaker_1": "...", "speaker_2": "..."}
             如果用户未配置，返回 None（由调用方决定使用默认值或智能分配）
         """
         if prompt_file is None:
@@ -39,29 +39,35 @@ class VoiceConfigParser:
         with open(prompt_file, 'r', encoding='utf-8') as f:
             content = f.read()
 
-        # 匹配配置行：音色配置: speaker_0:{...}, speaker_1:{...}
-        pattern = r'音色配置:\s*speaker_0:\{([^}]+)\}\s*,\s*speaker_1:\{([^}]+)\}'
-        match = re.search(pattern, content)
+        # 动态匹配：找到音色配置行，然后解析所有 speaker_N:{voice} 模式
+        # 支持格式：音色配置: speaker_0:{...}, speaker_1:{...}, speaker_2:{...}
+        config_line_pattern = r'音色配置:\s*(.+?)(?:\n|$)'
+        config_match = re.search(config_line_pattern, content)
 
-        if match:
-            speaker_0_voice = match.group(1).strip()
-            speaker_1_voice = match.group(2).strip()
-
-            voice_config = {
-                "speaker_0": speaker_0_voice,
-                "speaker_1": speaker_1_voice
-            }
-
-            print(f"✓ 从配置文件读取音色:")
-            print(f"  speaker_0: {speaker_0_voice}")
-            print(f"  speaker_1: {speaker_1_voice}")
-
-            return voice_config
-        else:
+        if not config_match:
             print(f"⚠️  未在 {prompt_file.name} 中找到音色配置")
             print(f"  提示：可在文件中添加以下格式手动指定音色：")
             print(f"  音色配置: speaker_0:{{Grounded_Grace}}, speaker_1:{{Credible_Alex}}")
             return None
+
+        config_line = config_match.group(1)
+
+        # 解析所有 speaker_N:{voice} 模式
+        speaker_pattern = r'speaker_(\d+):\{([^}]+)\}'
+        speaker_matches = re.findall(speaker_pattern, config_line)
+
+        if not speaker_matches:
+            print(f"⚠️  未在配置行中找到有效的speaker音色配置")
+            return None
+
+        voice_config = {}
+        print(f"✓ 从配置文件读取音色:")
+        for speaker_id, voice_name in speaker_matches:
+            speaker_key = f"speaker_{speaker_id}"
+            voice_config[speaker_key] = voice_name.strip()
+            print(f"  {speaker_key}: {voice_name.strip()}")
+
+        return voice_config
 
     @staticmethod
     def validate_voice_names(voice_config: Dict[str, str]) -> bool:

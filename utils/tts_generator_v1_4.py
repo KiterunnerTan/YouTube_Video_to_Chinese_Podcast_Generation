@@ -52,10 +52,16 @@ class VoiceManager:
         if speaker_name in self.voice_mapping:
             return self.voice_mapping[speaker_name]
 
-        # 如果超出范围，循环复用（从speaker_2开始复用）
-        # 避免覆盖主持人和主要嘉宾
-        fallback_index = 2 + ((speaker_id - 2) % 6)
-        fallback_speaker = f"speaker_{fallback_index}"
+        # 如果超出范围，循环复用已有的音色配置
+        # 获取所有已配置的speaker，按编号排序
+        configured_speakers = sorted(self.voice_mapping.keys())
+        if not configured_speakers:
+            raise ValueError("No voice configuration available")
+
+        # 循环复用：超出范围的speaker使用已有配置（取模）
+        fallback_index = speaker_id % len(configured_speakers)
+        fallback_speaker = configured_speakers[fallback_index]
+        print(f"  ℹ️  {speaker_name} 未配置，复用 {fallback_speaker} 的音色")
         return self.voice_mapping[fallback_speaker]
 
     def get_all_speakers_from_text(self, text: str) -> List[str]:

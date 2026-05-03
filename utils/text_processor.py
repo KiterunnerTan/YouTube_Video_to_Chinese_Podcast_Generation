@@ -31,7 +31,11 @@ class TextProcessor:
         segments = asr_result.get("segments", [])
 
         for segment in segments:
-            transcription = segment.get("transcription", {})
+            transcription = segment.get("transcription")
+
+            # Skip if transcription is None or empty
+            if not transcription:
+                continue
 
             # Support both Recognition API ("sentence") and Transcription API ("sentences")
             sentences = transcription.get("sentence", []) or transcription.get("sentences", [])

@@ -16,9 +16,11 @@ print("=" * 80)
 print("📝 重新生成播客描述文案")
 print("=" * 80)
 
-# 解析节目名
+# 解析节目名和嘉宾名
 podcast_name = PodcastNameParser.parse_podcast_name()
+guest_name = PodcastNameParser.parse_guest_name() or "未知嘉宾"
 print(f"✓ 播客名: {podcast_name}")
+print(f"✓ 嘉宾: {guest_name}")
 
 # 从 start_prompt.md 提取 YouTube URL
 try:
@@ -42,32 +44,39 @@ except Exception:
     youtube_url = "www.youtube.com"
     print(f"⚠️  无法提取 YouTube URL，使用默认值")
 
-# 查找匹配的 ASR 文件
-asr_dir = Path("output/asr_results")
+# 查找匹配的 ASR 文件（优先从播客目录查找）
+from utils.podcast_manager import PodcastManager
+
+manager = PodcastManager()
 asr_file = None
 
 if youtube_url and youtube_url != "www.youtube.com":
-    for asr_path in asr_dir.glob("qwen_asr_*.json"):
-        try:
-            with open(asr_path, 'r', encoding='utf-8') as f:
-                asr_data = json.load(f)
-                metadata = asr_data.get('metadata', {})
-                if metadata.get('youtube_url') == youtube_url:
-                    asr_file = asr_path
-                    print(f"✓ 找到匹配的ASR文件: {asr_file.name}")
-                    break
-        except:
-            continue
+    podcast_id = manager.find_podcast_by_url(youtube_url)
+    if podcast_id:
+        asr_path = manager.get_asr_path(podcast_id)
+        if asr_path.exists():
+            asr_file = asr_path
+            print(f"✓ 找到播客目录ASR文件: {asr_file}")
+
+# 如果播客目录没找到，从 asr_results 目录查找
+if not asr_file:
+    asr_dir = Path("output/asr_results")
+    if asr_dir.exists():
+        for asr_path in asr_dir.glob("qwen_asr_*.json"):
+            try:
+                with open(asr_path, 'r', encoding='utf-8') as f:
+                    asr_data = json.load(f)
+                    metadata = asr_data.get('metadata', {})
+                    if metadata.get('youtube_url') == youtube_url:
+                        asr_file = asr_path
+                        print(f"✓ 找到匹配的ASR文件: {asr_file.name}")
+                        break
+            except:
+                continue
 
 if not asr_file:
-    # 如果没找到匹配的，使用最新的 ASR 文件（包括 asr_processed.json）
-    asr_files = sorted(asr_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True)
-    if asr_files:
-        asr_file = asr_files[0]
-        print(f"⚠️  未找到精确匹配，使用最新的ASR文件: {asr_file.name}")
-    else:
-        print("❌ 未找到任何ASR文件")
-        exit(1)
+    print("❌ 未找到任何ASR文件")
+    exit(1)
 
 print()
 
@@ -109,3 +118,43 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     exit(1)
+
+# ============================================================================
+# 步骤2: 生成微信公众号文案
+# ============================================================================
+print("\n" + "=" * 80)
+print("📱 生成微信公众号文案...")
+print("=" * 80)
+
+try:
+    with open(asr_file, 'r', encoding='utf-8') as f:
+        asr_data = json.load(f)
+
+    if 'formatted_text' in asr_data:
+        asr_text = asr_data['formatted_text']
+    elif 'results' in asr_data:
+        asr_text = '\n'.join([item.get('text', '') for item in asr_data['results']])
+    else:
+        asr_text = str(asr_data)
+
+    wx_description = desc_generator.generate_wx_description(
+        podcast_name=podcast_name,
+        guest_name=guest_name,
+        transcript=asr_text,
+        video_url=youtube_url
+    )
+
+    if wx_description:
+        wx_output_dir = Path("output/wx_description")
+        wx_output_dir.mkdir(parents=True, exist_ok=True)
+        wx_output_file = wx_output_dir / f"{podcast_name}.md"
+        with open(wx_output_file, 'w', encoding='utf-8') as f:
+            f.write(wx_description)
+        print(f"✓ 微信公众号文案已保存: {wx_output_file}")
+    else:
+        print("⚠️ 微信公众号文案生成失败")
+
+except Exception as e:
+    print(f"❌ 微信公众号文案生成失败: {e}")
+    import traceback
+    traceback.print_exc()
